@@ -7,6 +7,12 @@ from urllib.parse import urlparse
 ROOT=Path(os.environ.get('STREAMFORGE_DATA','/data')); DOWNLOADS=Path(os.environ.get('STREAMFORGE_DOWNLOADS','/downloads')); STATIC=Path(__file__).parent
 ROOT.mkdir(parents=True,exist_ok=True); DOWNLOADS.mkdir(parents=True,exist_ok=True)
 STATE=ROOT/'state.json'; LOCK=threading.RLock(); jobs={}; processes={}; config={'concurrency':2,'metadata':False,'queue_mode':False,'cookies':{'bilibili':'','youtube':''},'proxies':{'bilibili':'','youtube':''}}
+NODE_MODE=os.environ.get('STREAMFORGE_NODE','none')
+def node_runtime():
+ for p in ('/usr/local/bin/node','/opt/node/bin/node','/usr/bin/node'):
+  if Path(p).is_file() and os.access(p,os.X_OK): return p
+ return ''
+NODE_PATH=node_runtime()
 if STATE.exists():
  try: config.update(json.loads(STATE.read_text()))
  except Exception: pass
@@ -24,6 +30,7 @@ def formats(info):
  return {'title':info.get('title'),'id':info.get('id'),'uploader':info.get('uploader'),'thumbnail':info.get('thumbnail'),'webpage_url':info.get('webpage_url'),'duration':info.get('duration'),'upload_date':info.get('upload_date'),'description':info.get('description'),'formats':out}
 def run_ytdlp(args,platform='bilibili',capture=True):
  cmd=['yt-dlp','--no-warnings','--newline']+args
+ if NODE_PATH: cmd += ['--js-runtimes',f'node:{NODE_PATH}']
  c=config.get('cookies',{}).get(platform,''); p=config.get('proxies',{}).get(platform,'')
  if c: cmd += ['--cookies',c]
  if p: cmd += ['--proxy',p]
@@ -62,7 +69,7 @@ class Handler(BaseHTTPRequestHandler):
  def body(self): return json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or b'{}')
  def do_GET(self):
   path=urlparse(self.path).path
-  if path=='/api/health': return json_response(self,200,{'ok':True,'version':'0.1.0'})
+  if path=='/api/health': return json_response(self,200,{'ok':True,'version':'0.1.0','node':{'mode':NODE_MODE,'path':NODE_PATH,'version':subprocess.run([NODE_PATH,'--version'],capture_output=True,text=True).stdout.strip() if NODE_PATH else ''}})
   if path=='/api/jobs':
    with LOCK: return json_response(self,200,{'jobs':list(jobs.values()),'config':config})
   if path=='/api/config': return json_response(self,200,config)

@@ -15,13 +15,24 @@
 
 B站扫码登录、插件运行时 API、项目自更新和 yt-dlp 在线更新的界面已经预留，但尚未接入后端。安装或恢复插件后是否需要重启，当前以界面提示为准，实际插件加载器会在后续版本实现。
 
-## Docker
+## 安装
+
+在宿主机终端运行：
 
 ```sh
-docker compose up -d --build
+chmod +x install.sh
+./install.sh
 ```
 
-默认访问 `http://127.0.0.1:8081`。数据写入 `./data`，下载写入 `./downloads`。容器镜像包含 `ffmpeg`、`node` 和最新稳定版 yt-dlp。
+安装脚本会检测宿主机 Node.js：
+
+- 选择使用宿主机 Node.js：以只读方式挂载，不改宿主机文件。
+- 选择不使用后，会继续询问是否下载当前架构的 Node.js 到 `data/tools/node/`。
+- 两项都不选择：仍可使用基础下载功能，但 YouTube 某些解析可能受限。
+
+安装选择会写入生成的 `compose.generated.yaml`。Node.js 来源和版本可通过 `/api/health` 查看。
+
+安装和更新容器可能中断正在进行的任务；配置、下载目录和插件目录使用独立挂载保存。
 
 ## Preview
 
