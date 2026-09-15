@@ -1,0 +1,14 @@
+services:
+  streamforge:
+    build: .
+    container_name: streamforge
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      STREAMFORGE_DATA: /data
+      STREAMFORGE_DOWNLOADS: /downloads
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads
+      - ./plugins:/plugins
