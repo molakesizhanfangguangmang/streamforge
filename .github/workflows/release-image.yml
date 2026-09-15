@@ -18,15 +18,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Build ARM64 OCI image archive
+      - name: Build ARM64 image into runner Docker
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/arm64
-          outputs: type=docker,dest=/tmp/streamforge-arm64.tar
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:release
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Export Docker archive
+        run: docker save ${{ env.IMAGE_NAME }}:release -o /tmp/streamforge-arm64.tar
       - name: Compress image archive
         run: zstd -T0 -19 /tmp/streamforge-arm64.tar -o /tmp/streamforge-arm64.tar.zst
       - name: Upload release asset
