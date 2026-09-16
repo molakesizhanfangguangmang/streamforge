@@ -352,6 +352,12 @@ def refresh_bilibili_login():
 def normalized_version(value):
     return str(value or '').strip().lower().lstrip('v')
 
+def ytdlp_local_version():
+    try:
+        return subprocess.run([ytdlp_binary(), '--version'], capture_output=True, text=True, timeout=15).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
 def update_status():
     code, data = update_agent('status')
     release = data.get('release') if isinstance(data, dict) else None
@@ -359,6 +365,12 @@ def update_status():
     current = normalized_version(APP_VERSION)
     data['current_version'] = APP_VERSION
     data['up_to_date'] = bool(latest and latest == current)
+    yt = data.get('ytdlp')
+    if isinstance(yt, dict) and yt.get('ok') and not yt.get('up_to_date'):
+        local = ytdlp_local_version()
+        if local:
+            yt['current'] = local
+            yt['up_to_date'] = normalized_version(yt.get('tag')) == normalized_version(local)
     return code, data
 
 def update_agent(method):
