@@ -11,7 +11,7 @@ function renderRows(target,rows,type){
   target.innerHTML=rows.map((r,i)=>{
     const bitrate=known(r.tbr)?r.tbr:r.abr;
     const cells=video
-      ?[display(r.resolution),display(r.vcodec),display(r.fps,' fps'),display(r.bit_depth,' bit'),display(r.dynamic_range),display(r.dolby),fmtSize(r.size)]
+      ?[display(r.resolution),display(r.vcodec),display(r.fps,' fps'),display(r.bit_depth,' bit'),display(r.dynamic_range),fmtSize(r.size)]
       :[display(bitrate,' kbps'),display(r.acodec),display(r.asr,' Hz'),display(r.audio_channels),display(r.dolby),fmtSize(r.size)];
     return `<tr><td><input type="radio" name="${type}-format" value="${escapeHtml(r.id??'')}" ${i===0?'checked':''}></td><td>${display(r.id)}</td>${cells.map((cell,j)=>`<td${j===0?' class="format-quality"':''}>${j===1?`<span class="codec">${cell}</span>`:cell}</td>`).join('')}</tr>`;
   }).join('')||`<tr class="table-empty"><td colspan="${video?9:8}">没有可用流</td></tr>`;
