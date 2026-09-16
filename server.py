@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-import base64, binascii, json, os, re, shutil, signal, subprocess, threading, time, uuid, zipfile, tempfile, io
+import base64, binascii, collections, json, os, re, shutil, signal, subprocess, threading, time, uuid, zipfile, tempfile, io
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor, ProxyHandler
 from http.cookiejar import MozillaCookieJar, CookieJar
 from stream_metadata import enrich_formats
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs
 try:
     import qrcode
 except ImportError:
@@ -36,7 +36,8 @@ LOCK = threading.RLock()
 processes = {}
 config = {'concurrency': 2, 'metadata': False, 'queue_mode': False, 'download_path': '/downloads',
           'cookies': {'bilibili': str(ROOT / 'cookies' / 'bilibili.txt'), 'youtube': ''},
-          'proxies': {'bilibili': '', 'youtube': ''}}
+          'proxies': {'bilibili': '', 'youtube': ''},
+          'update_check_days': 7, 'update_cache': {}}
 QR_SESSIONS = {}
 jobs = {}
 LOGS = []
@@ -238,8 +239,8 @@ def save_bilibili_text(cookie_text):
         candidate.unlink(missing_ok=True)
     return bilibili_auth()
 
-YOUTUBE_AUTH_COOKIE_NAMES = {'SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LOGIN_INFO',
-                             '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID'}
+YOUTUBE_LOGIN_COOKIE_NAMES = ('SID', 'SAPISID', 'APISID', 'HSID', 'SSID', 'LOGIN_INFO',
+                              '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID')
 
 def youtube_cookie_path(): return ROOT / 'cookies' / 'youtube.txt'
 
@@ -265,22 +266,40 @@ def normalize_cookie_text(cookie_text):
 
 def youtube_auth(count=None):
     path = Path(config.get('cookies', {}).get('youtube', ''))
-    result = {'youtube': False, 'youtube_configured': path.is_file(), 'youtube_cookies': 0, 'youtube_error': None}
+    result = {'youtube': False, 'youtube_configured': path.is_file(), 'youtube_cookies': 0, 'youtube_error': None,
+              'youtube_valid': 0, 'youtube_expired': 0, 'youtube_login_present': [], 'youtube_login_missing': list(YOUTUBE_LOGIN_COOKIE_NAMES),
+              'youtube_nearest_expiry': None, 'youtube_saved_at': None}
     if not path.is_file():
         if config.get('cookies', {}).get('youtube'): result['youtube_error'] = 'Cookie 文件已丢失，请重新粘贴'
         return result
     try:
         jar = MozillaCookieJar(str(path))
         jar.load(ignore_discard=True, ignore_expires=True)
-        result['youtube_cookies'] = len(jar) if count is None else count
-        result['youtube'] = bool(result['youtube_cookies'])
     except Exception:
         result['youtube_error'] = 'Cookie 文件无法解析，请重新粘贴'
+        return result
+    now = time.time()
+    cookies = [c for c in jar if c.value]
+    result['youtube_cookies'] = len(cookies) if count is None else count
+    live = {c.name for c in cookies if not c.expires or c.expires > now}
+    result['youtube_valid'] = sum(1 for c in cookies if not c.expires or c.expires > now)
+    result['youtube_expired'] = len(cookies) - result['youtube_valid']
+    names = {c.name for c in cookies}
+    result['youtube_login_present'] = [n for n in YOUTUBE_LOGIN_COOKIE_NAMES if n in names]
+    result['youtube_login_missing'] = [n for n in YOUTUBE_LOGIN_COOKIE_NAMES if n not in names]
+    result['youtube_login_expired'] = [n for n in YOUTUBE_LOGIN_COOKIE_NAMES if n in names and n not in live]
+    expiries = [c.expires for c in cookies if c.name in YOUTUBE_LOGIN_COOKIE_NAMES and c.expires and c.expires > now]
+    result['youtube_nearest_expiry'] = min(expiries) if expiries else None
+    try: result['youtube_saved_at'] = path.stat().st_mtime
+    except OSError: pass
+    result['youtube'] = bool(result['youtube_login_present']) and not result['youtube_login_expired']
+    if not result['youtube'] and not result['youtube_error']:
+        result['youtube_error'] = '登录凭据已过期，请重新粘贴 Cookie' if result['youtube_login_expired'] else 'Cookie 中没有登录凭据，yt-dlp 无法通过 YouTube 的登录校验'
     return result
 
 def save_youtube_text(cookie_text):
     content, names = normalize_cookie_text(cookie_text)
-    if not set(names) & YOUTUBE_AUTH_COOKIE_NAMES:
+    if not set(names) & set(YOUTUBE_LOGIN_COOKIE_NAMES):
         raise ValueError('Cookie 中没有 YouTube 登录凭据（缺少 SID、SAPISID 或 LOGIN_INFO 等字段）')
     target = youtube_cookie_path()
     candidate = target.with_suffix('.candidate')
@@ -298,6 +317,33 @@ def save_youtube_text(cookie_text):
     finally:
         candidate.unlink(missing_ok=True)
     return youtube_auth(count)
+
+ERROR_HINTS = (
+    ('sign in to confirm', 'YouTube 要求确认登录：需要有效 Cookie；仍需登录时通常是出口网络不可达，需要代理'),
+    ('login_required', 'YouTube 要求登录：Cookie 缺失或已失效'),
+    ('not a bot', 'YouTube 判定为机器人请求：需要有效 Cookie 与可用的出口网络'),
+    ('failed to extract any player response', '无法取得播放信息：多为网络不可达或被拦截，检查代理'),
+    ('unable to download webpage', 'yt-dlp 无法访问该网页：检查网络或代理设置'),
+    ('failed to resolve', 'DNS 解析失败：检查网络或代理设置'),
+    ('urlopen error', '网络连接失败：检查代理设置'),
+    ('http error 403', '服务器返回 403：Cookie 可能已失效或触发风控'),
+    ('no such file or directory: \'/data/cookies', 'Cookie 文件不存在：请重新在设置中保存 Cookie'),
+)
+
+def friendly_error(text):
+    text = str(text or '').strip()
+    lowered = text.lower()
+    hints = [hint for key, hint in ERROR_HINTS if key in lowered]
+    if not hints: return text[-1500:]
+    return (text[-1200:] + '\n提示：' + '；'.join(dict.fromkeys(hints)))[-1500:]
+
+_COOKIE_WARNED = set()
+
+def warn_missing_cookie(platform, path):
+    key = (platform, str(path))
+    if key in _COOKIE_WARNED: return
+    _COOKIE_WARNED.add(key)
+    log_event('error', f'{platform} 已配置 Cookie 但文件不存在，本次调用不带 --cookies：{path}', 'error')
 
 def bilibili_auth():
     path = Path(config.get('cookies', {}).get('bilibili', ''))
@@ -419,20 +465,69 @@ def ytdlp_local_version():
     except (OSError, subprocess.SubprocessError):
         return ''
 
-def update_status():
-    code, data = update_agent('status')
+UPDATE_CHECK_CHOICES = (0, 1, 7, 14)
+UPDATE_WATCH_INTERVAL = 600
+
+def update_check_days():
+    try: days = int(config.get('update_check_days', 7))
+    except (TypeError, ValueError): days = 7
+    return days if days in UPDATE_CHECK_CHOICES else 7
+
+def update_cache():
+    cache = config.get('update_cache')
+    return cache if isinstance(cache, dict) else {}
+
+def decorate_update_status(data):
     release = data.get('release') if isinstance(data, dict) else None
     latest = normalized_version(release.get('tag')) if isinstance(release, dict) else ''
-    current = normalized_version(APP_VERSION)
     data['current_version'] = APP_VERSION
-    data['up_to_date'] = bool(latest and latest == current)
+    data['up_to_date'] = bool(latest and latest == normalized_version(APP_VERSION))
     yt = data.get('ytdlp')
     if isinstance(yt, dict) and yt.get('ok') and not yt.get('up_to_date'):
         local = ytdlp_local_version()
         if local:
             yt['current'] = local
             yt['up_to_date'] = normalized_version(yt.get('tag')) == normalized_version(local)
-    return code, data
+    return data
+
+def update_status(fresh=False):
+    days = update_check_days()
+    checked_at = update_cache().get('checked_at')
+    if not fresh:
+        cached = update_cache().get('data')
+        result = dict(cached) if isinstance(cached, dict) else {}
+        result.update({'cached': True, 'checked': bool(cached), 'current_version': APP_VERSION,
+                       'auto_check_days': days, 'checked_at': checked_at,
+                       'next_check_at': (checked_at + days * 86400) if (checked_at and days) else None})
+        return 200, result
+    code, data = update_agent('status')
+    data = decorate_update_status(data)
+    stamp = time.time()
+    with LOCK:
+        config['update_cache'] = {'checked_at': stamp, 'code': code, 'data': data}
+        save_config()
+    return code, {**data, 'cached': False, 'checked': True, 'auto_check_days': days,
+                  'checked_at': stamp, 'next_check_at': (stamp + days * 86400) if days else None}
+
+def update_check_due(now=None, days=None):
+    days = update_check_days() if days is None else days
+    if days <= 0: return False
+    last = float(update_cache().get('checked_at') or 0)
+    return (time.time() if now is None else now) - last >= days * 86400
+
+def update_watcher():
+    while True:
+        time.sleep(UPDATE_WATCH_INTERVAL)
+        try:
+            days = update_check_days()
+            if update_check_due(days=days):
+                _, data = update_status(fresh=True)
+                release = data.get('release') or {}
+                yt = data.get('ytdlp') or {}
+                found = release.get('available') or yt.get('available')
+                log_event('system', f'按设定周期（每 {days} 天）检查更新：' + ('发现可更新内容' if found else '当前均为最新版本'))
+        except Exception as exc:
+            log_event('error', f'自动检查更新失败：{exc}', 'error')
 
 def update_agent(method):
     if not UPDATE_AGENT_URL or not UPDATE_AGENT_TOKEN_FILE:
@@ -458,6 +553,7 @@ def ytdlp_args(args, platform='bilibili'):
     cookie = config.get('cookies', {}).get(platform, '')
     proxy = config.get('proxies', {}).get(platform, '')
     if cookie and Path(cookie).is_file(): cmd += ['--cookies', cookie]
+    elif cookie: warn_missing_cookie(platform, cookie)
     if proxy: cmd += ['--proxy', proxy]
     return cmd + args
 
@@ -535,7 +631,9 @@ def run_download(job):
         proc = subprocess.Popen(ytdlp_args(args, job.get('platform', 'bilibili')), stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
         with LOCK: processes[jid] = proc
+        tail = collections.deque(maxlen=25)
         for line in proc.stdout:
+            tail.append(line.strip())
             with LOCK: job['log'] = line.strip()[-800:]; job['updated_at'] = time.time()
             match = re.search(r'\[download\]\s+(\d+(?:\.\d+)?)%', line)
             if match: job['percent'] = float(match.group(1))
@@ -545,10 +643,11 @@ def run_download(job):
         with LOCK:
             job['status'] = 'cancelled' if job.get('cancel_requested') else 'done' if rc == 0 else 'error'
             job['returncode'] = rc
+            if rc != 0 and not job.get('cancel_requested'): job['error'] = friendly_error('\n'.join(tail))
             if rc == 0 and job.get('metadata'): write_nfo(folder, job)
         save_jobs()
     except Exception as exc:
-        job['status'] = 'error'; job['error'] = str(exc); save_jobs()
+        job['status'] = 'error'; job['error'] = friendly_error(str(exc)); save_jobs()
     finally:
         with LOCK: processes.pop(jid, None)
 
@@ -562,6 +661,7 @@ def scheduler():
             threading.Thread(target=run_download, args=(job,), daemon=True).start()
         time.sleep(.5)
 threading.Thread(target=scheduler, daemon=True).start()
+threading.Thread(target=update_watcher, daemon=True).start()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
@@ -574,8 +674,9 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK: return response(self, 200, {'jobs': list(jobs.values()), 'config': config})
         if path == '/api/config': return response(self, 200, config)
         if path == '/api/updates':
+            fresh = parse_qs(urlparse(self.path).query).get('fresh', ['0'])[0].lower() in ('1', 'true', 'yes')
             try:
-                code, data = update_status()
+                code, data = update_status(fresh=fresh)
                 return response(self, code, data)
             except ValueError as exc: return response(self, 503, {'error': str(exc)})
         if path == '/api/logs': return response(self, 200, LOGS)
@@ -591,7 +692,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/': path = '/index.html'
         file = STATIC / path.lstrip('/')
         if file.is_file():
-            data = file.read_bytes(); kind = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css'}.get(file.suffix, 'application/octet-stream')
+            data = file.read_bytes(); kind = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png'}.get(file.suffix, 'application/octet-stream')
             self.send_response(200); self.send_header('Cache-Control', 'no-cache'); self.send_header('Content-Type', kind); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data); return
         response(self, 404, {'error': 'not found'})
     def do_POST(self):
@@ -604,7 +705,7 @@ class Handler(BaseHTTPRequestHandler):
                     log_event('parse', '解析完成')
                     return response(self, 200, formats(enrich_formats(json.loads(result.stdout))))
                 log_event('error', '解析失败', 'error')
-                return response(self, 422, {'error': result.stderr[-1500:]})
+                return response(self, 422, {'error': friendly_error(result.stderr)})
             except Exception as exc: return response(self, 500, {'error': str(exc)})
         if path == '/api/jobs':
             if not body.get('url') or not body.get('format'): return response(self, 400, {'error': 'url and format are required'})
@@ -632,7 +733,13 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, 200, {'ok': True, 'path': str(selected), 'host_mount_required': False})
             except ValueError as exc: return response(self, 422, {'error': str(exc)})
         if path == '/api/config':
-            with LOCK: config.update({k: v for k, v in body.items() if k in ('concurrency', 'metadata', 'queue_mode', 'download_path', 'cookies', 'proxies')}); save_config()
+            with LOCK:
+                if 'update_check_days' in body:
+                    days = body['update_check_days']
+                    if isinstance(days, bool) or not isinstance(days, int) or days not in UPDATE_CHECK_CHOICES:
+                        return response(self, 422, {'error': '自动检查更新只能是每天、每 7 天、每 14 天或不自动检测'})
+                    config['update_check_days'] = days
+                config.update({k: v for k, v in body.items() if k in ('concurrency', 'metadata', 'queue_mode', 'download_path', 'cookies', 'proxies')}); save_config()
             return response(self, 200, config)
         if path == '/api/bilibili/qr/start':
             try: return response(self, 200, qr_start())

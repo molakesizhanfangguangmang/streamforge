@@ -42,9 +42,44 @@ with tempfile.TemporaryDirectory() as tmp:
         try: ns['save_youtube_text'](bad)
         except ValueError: pass
         else: raise AssertionError('invalid YouTube cookie accepted: %r' % bad)
+    detail = ns['youtube_auth']()
+    assert detail['youtube_login_present'] == ['SID', 'SAPISID'] and detail['youtube_login_missing'] and not detail['youtube_login_expired']
+    assert detail['youtube_valid'] == 3 and detail['youtube_expired'] == 0 and detail['youtube_saved_at'] > 0
+    ns['save_youtube_text']('SID=%s; LOGIN_INFO=x; SAPISID=y' % ('a' * 8))
+    ns['youtube_cookie_path']().write_text('# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t100\tSID\told\n.youtube.com\tTRUE\t/\tTRUE\t1900000000\tPREF\tkeep\n', encoding='utf-8')
+    stale = ns['youtube_auth']()
+    assert stale['youtube'] is False and stale['youtube_login_expired'] == ['SID'] and stale['youtube_expired'] == 1 and stale['youtube_valid'] == 1
+    assert '已过期' in stale['youtube_error']
     youtube_file.unlink()
     assert '--cookies' not in ns['ytdlp_args'](['--version'], 'youtube')
     assert ns['youtube_auth']()['youtube_error'] == 'Cookie 文件已丢失，请重新粘贴'
+    assert ns['friendly_error']('ERROR: Sign in to confirm you are not a bot. Use --cookies.') .count('提示：') == 1
+    assert ns['friendly_error']('plain failure') == 'plain failure'
+    assert ns['update_check_days']() == 7
+    ns['config']['update_check_days'] = 14
+    assert ns['update_check_days']() == 14
+    ns['config']['update_check_days'] = 5
+    assert ns['update_check_days']() == 7
+    ns['config']['update_check_days'] = 0
+    assert ns['update_check_days']() == 0
+    ns['config']['update_cache'] = {}
+    code, payload = ns['update_status'](fresh=False)
+    assert code == 200 and payload['checked'] is False and payload['cached'] is True and payload['current_version']
+    ns['config']['update_cache'] = {'checked_at': 1700000000, 'code': 200, 'data': {'release': {'ok': True, 'tag': 'v1.0.0', 'available': False}}}
+    code, payload = ns['update_status'](fresh=False)
+    assert payload['checked'] is True and payload['checked_at'] == 1700000000 and payload['next_check_at'] is None
+    ns['config']['update_check_days'] = 7
+    assert ns['update_status'](fresh=False)[1]['next_check_at'] == 1700000000 + 7 * 86400
+    now = 1800000000.0
+    due = ns['update_check_due']
+    ns['config']['update_cache'] = {}
+    assert due(now=now) is True
+    ns['config']['update_cache'] = {'checked_at': now - 8 * 86400}
+    assert due(now=now) is True and due(now=now - 2 * 86400) is False
+    ns['config']['update_cache'] = {'checked_at': now - 3 * 86400}
+    assert due(now=now) is False and due(now=now, days=1) is True
+    ns['config']['update_check_days'] = 0
+    assert due(now=now + 365 * 86400) is False
     for code, state in [(86090, 'scanned'), (86038, 'expired'), (86101, 'waiting')]:
         ns['QR_SESSIONS']['test'] = {'created': ns['time'].time(), 'key': 'test', 'jar': jar}
         with patch.dict(ns, bilibili_request=lambda *a, code=code: io.BytesIO(json.dumps({'data': {'code': code}}).encode())):
