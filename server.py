@@ -71,6 +71,30 @@ def save_config(): atomic_json(STATE, config)
 def save_jobs():
     with LOCK: atomic_json(JOBS_STATE, list(jobs.values()))
 
+def reconcile_jobs_on_startup():
+    """收拾上次运行留下的中断任务。
+
+    容器重启时下载进程全没了，jobs.json 里却还留着 running / paused。不收拾的后果：
+    scheduler 只挑 queued，而并发额度又把这些行当成在跑的算 —— 僵尸任务白占下载位，
+    前端还一直显示「正在下载」，两条僵尸就等于下载停摆。这里把它们放回队列
+    （yt-dlp 接着 .part 续传）；已经请求过取消的直接落成 cancelled。
+    """
+    stale = [job for job in jobs.values() if job.get('status') in ('running', 'paused')]
+    if not stale: return 0
+    for job in stale:
+        job['status'] = 'cancelled' if job.get('cancel_requested') else 'queued'
+        job['log'] = ((job.get('log') or '') + '\n[服务重启] 上次运行被中断，已重新排队').strip()
+        job['updated_at'] = time.time()
+    save_jobs()
+    log_event('download', '服务重启：%d 个中断的任务已重新排队' % len(stale))
+    return len(stale)
+
+RECONCILED_JOBS = 0
+try:
+    RECONCILED_JOBS = reconcile_jobs_on_startup()
+except Exception as exc:  # 对账失败不该拦住服务启动
+    log_event('download', '启动状态对账失败：%s' % exc, 'error')
+
 def response(h, code, value):
     raw = json.dumps(value, ensure_ascii=False).encode()
     h.send_response(code); h.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -771,13 +795,16 @@ def run_download(job):
                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
         with LOCK: processes[jid] = proc
         tail = collections.deque(maxlen=25)
+        last_save = 0.0
         for line in proc.stdout:
             tail.append(line.strip())
             with LOCK: job['log'] = line.strip()[-800:]; job['updated_at'] = time.time()
             match = re.search(r'\[download\]\s+(\d+(?:\.\d+)?)%', line)
             if match: job['percent'] = float(match.group(1))
             if job.get('cancel_requested'): proc.terminate(); break
-            save_jobs()
+            # yt-dlp 一秒能吐几十行，每行都落盘等于把整份 jobs.json 重写几十遍（写放大）。
+            # 进度按秒节流；状态变化与收尾仍由下面的 save_jobs() 立即写。
+            if time.time() - last_save >= 1: save_jobs(); last_save = time.time()
         rc = proc.wait()
         with LOCK:
             job['status'] = 'cancelled' if job.get('cancel_requested') else 'done' if rc == 0 else 'error'

@@ -32,7 +32,20 @@ chmod +x install.sh
 
 安装选择会写入生成的 `compose.generated.yaml`。Node.js 来源和版本可通过 `/api/health` 查看。
 
-安装和更新容器可能中断正在进行的任务；配置、下载目录和插件目录使用独立挂载保存。
+安装和更新容器可能中断正在进行的任务；被中断的任务在服务重启后会重新排队。配置、下载目录和插件目录使用独立挂载保存。
+
+## 本地自测
+
+```sh
+python3 test_media_files.py   # 元数据、NFO、封面命名
+python3 test_media_auth.py    # Cookie 往返、账号状态、扫码状态映射
+python3 test_plugin_zip.py    # 插件 ZIP 的安全边界与安装回退
+python3 test_jobs.py          # 任务状态与 jobs.json 的容错
+```
+
+四个脚本都不联网：把数据目录指到临时目录，只执行 `server.py` 的函数体（截到起线程之前），不起 HTTP 服务、不下载。失败时退出码非零。
+
+CI 里由 `Tests` 工作流执行，镜像构建（`container.yml`、`release-image.yml`）依赖它先通过。
 
 ## Preview
 

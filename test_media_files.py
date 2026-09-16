@@ -1,27 +1,13 @@
-import ast, os, sys, tempfile
+import tempfile
 from pathlib import Path
 from xml.etree.ElementTree import fromstring
+from testkit import Checks, load_server
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-failures = []
-
-def check(name, condition, detail=''):
-    print(('PASS  ' if condition else 'FAIL  ') + name + ('' if condition else '  -> ' + str(detail)))
-    if not condition: failures.append(name)
+checks = Checks()
+check = checks.check
 
 with tempfile.TemporaryDirectory() as tmp:
-    os.environ['STREAMFORGE_DATA'] = tmp + '/data'
-    os.environ['STREAMFORGE_DOWNLOADS'] = tmp + '/downloads'
-    path = Path(__file__).with_name('server.py')
-    tree = ast.parse(path.read_text())
-    # Execute the module without starting the scheduler or the HTTP server.
-    nodes = []
-    for n in tree.body:
-        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and ast.unparse(n).startswith('threading.Thread('): break
-        nodes.append(n)
-    ns = {'__file__': str(path)}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), ns)
+    ns = load_server(Path(tmp) / 'data', Path(tmp) / 'downloads')
 
     check('默认开启封面转 JPG', ns['config'].get('thumbnail_jpg') is True, ns['config'].get('thumbnail_jpg'))
 
@@ -82,6 +68,4 @@ with tempfile.TemporaryDirectory() as tmp:
     found = ns['media_file'](folder, ['[Merger] Merging formats into "%s"' % merged])
     check('优先采用 Merger 行里的文件', found == merged, found)
 
-print()
-print(('全部通过（%d 项）' % 0) if not failures else '失败 %d 项：%s' % (len(failures), failures))
-sys.exit(1 if failures else 0)
+checks.done()

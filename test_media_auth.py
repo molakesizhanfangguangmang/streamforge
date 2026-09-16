@@ -1,22 +1,13 @@
-import ast, base64, io, json, os, sys, tempfile, zipfile
+import base64, io, json, os, sys, tempfile, zipfile
 from pathlib import Path
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from unittest.mock import patch
 from types import SimpleNamespace
-sys.path.insert(0, str(Path(__file__).parent))
+from testkit import load_server
 import stream_metadata as m
 with tempfile.TemporaryDirectory() as tmp:
-    os.environ['STREAMFORGE_DATA'] = tmp + '/data'
-    os.environ['STREAMFORGE_DOWNLOADS'] = tmp + '/downloads'
-    path = Path(__file__).with_name('server.py')
-    tree = ast.parse(path.read_text())
-    # Exercise real helpers without starting the scheduler or HTTP server.
-    nodes = []
-    for n in tree.body:
-        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and ast.unparse(n).startswith('threading.Thread('): break
-        nodes.append(n)
-    ns = {'__file__': str(path)}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), ns)
+    # 只跑 server.py 的函数体（截到起线程之前），不起 scheduler，也不碰真实 /data。
+    ns = load_server(Path(tmp) / 'data', Path(tmp) / 'downloads')
     jar = CookieJar()
     jar.set_cookie(Cookie(0, 'SESSDATA', 'offline-test', None, False, '.bilibili.com', True, True, '/', True, True, None, True, None, None, {'HttpOnly': None}, False))
     assert ns['save_bilibili_jar'](jar) == 1
