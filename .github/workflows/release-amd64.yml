@@ -1,0 +1,87 @@
+name: Build AMD64 release image
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Release tag to receive the AMD64 assets
+        required: true
+        default: v1.0.0
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  IMAGE_NAME: streamforge:amd64-release
+  ARCHIVE_NAME: streamforge-amd64.tar.zst
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  release-image-amd64:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify target Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+      - name: Build stamp
+        run: echo "BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M:%SZ')" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build AMD64 image into runner Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE_NAME }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            BUILD_TIME=${{ env.BUILD_TIME }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify architecture and health
+        run: |
+          set -e
+          test "$(docker image inspect -f '{{.Architecture}}' "$IMAGE_NAME")" = amd64
+          id=$(docker run -d -p 127.0.0.1:18081:8081 "$IMAGE_NAME")
+          trap 'docker logs "$id"; docker rm -f "$id" >/dev/null' EXIT
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18081/api/health > /tmp/health.json; then
+              python3 -c 'import json; d=json.load(open("/tmp/health.json")); assert d["ok"] and d["build"]["tracked"] and d["build"]["sha"]'
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Export and compress Docker archive
+        run: |
+          docker save "$IMAGE_NAME" -o /tmp/streamforge-amd64.tar
+          zstd -T0 -19 /tmp/streamforge-amd64.tar -o "/tmp/$ARCHIVE_NAME"
+          cd /tmp
+          sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+          sha256sum -c "$ARCHIVE_NAME.sha256"
+
+      - name: Upload assets to existing Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "/tmp/$ARCHIVE_NAME" \
+            "/tmp/$ARCHIVE_NAME.sha256" \
+            --repo "$GITHUB_REPOSITORY"
