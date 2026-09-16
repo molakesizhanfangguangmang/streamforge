@@ -15,10 +15,11 @@ need() { command -v "$1" >/dev/null 2>&1 || { say "缺少命令：$1"; exit 1; }
 need curl; need docker; need sha256sum; need zstd; need python3
 [ -f "$COMPOSE_FILE" ] || { say "找不到 Compose 文件：$COMPOSE_FILE"; exit 1; }
 
-health_json() { curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null; }
+health_json() { curl --noproxy '*' -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null; }
 # 只看 /api/health 会漏掉「服务活着但静态页面没了」那类坏镜像，首页也一起要。
+# --noproxy 是硬约束：Release 下载可以走代理，本机探针绝不能被代理接走。
 probe() {
-  curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null || return 1
+  curl --noproxy '*' -fsS -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null || return 1
   health_json | grep -q '"ok": *true' || return 1
   return 0
 }
