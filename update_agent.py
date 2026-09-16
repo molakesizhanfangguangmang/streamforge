@@ -9,17 +9,26 @@ REPO='molakesizhanfangguangmang/streamforge'; YT_REPO='yt-dlp/yt-dlp'; YT_BINARY
 def token(): return TOKEN_FILE.read_text(encoding='ascii').strip()
 def latest(repo):
  with urlopen(f'https://api.github.com/repos/{repo}/releases/latest',timeout=15) as r: return json.load(r)
+CACHE={}; CACHE_TTL=900; CACHE_FAIL_TTL=60
+def cached(key,producer):
+ now=time.time(); item=CACHE.get(key)
+ if item and now-item['at']<item['ttl']: return item['data']
+ try: data=producer(); ttl=CACHE_TTL
+ except Exception as e:
+  if item and item['data'].get('ok'): return item['data']
+  data={'ok':False,'error':str(e)}; ttl=CACHE_FAIL_TTL
+ CACHE[key]={'at':now,'data':data,'ttl':ttl}; return data
 def release_status():
- try:
+ def produce():
   r=latest(REPO); a={x['name']:x['browser_download_url'] for x in r.get('assets',[])}; n='streamforge-arm64.tar.zst'
   return {'ok':True,'tag':r.get('tag_name'),'available':n in a and n+'.sha256' in a,'missing':[x for x in(n,n+'.sha256') if x not in a]}
- except Exception as e:return {'ok':False,'error':str(e)}
+ return cached('release',produce)
 def ytdlp_status():
- try:
+ def produce():
   r=latest(YT_REPO); a={x['name']:x['browser_download_url'] for x in r.get('assets',[])}; b=YT_DIR/'yt-dlp'; current=subprocess.run([str(b),'--version'],capture_output=True,text=True).stdout.strip() if b.is_file() else ''
   tag=r.get('tag_name'); normalized=str(tag or '').lstrip('v')
   return {'ok':True,'tag':tag,'available':YT_BINARY in a and 'SHA2-256SUMS' in a,'current':current,'up_to_date':bool(current and current==normalized),'url':a.get(YT_BINARY),'sums':a.get('SHA2-256SUMS')}
- except Exception as e:return {'ok':False,'error':str(e)}
+ return cached('ytdlp',produce)
 def download(url,path):
  with urlopen(url,timeout=120) as r,open(path,'wb') as f:shutil.copyfileobj(r,f)
 def run_ytdlp():
