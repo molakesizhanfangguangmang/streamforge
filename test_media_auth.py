@@ -80,6 +80,31 @@ with tempfile.TemporaryDirectory() as tmp:
     assert due(now=now) is False and due(now=now, days=1) is True
     ns['config']['update_check_days'] = 0
     assert due(now=now + 365 * 86400) is False
+    proxies = ns['config']['proxies']
+    proxies['bilibili'] = proxies['youtube'] = ''
+    args = ns['ytdlp_args'](['--url'], 'bilibili')
+    assert '--proxy' not in args
+    proxies['youtube'] = 'http://127.0.0.1:7890'
+    proxied = ns['ytdlp_args'](['--url'], 'youtube')
+    assert proxied[proxied.index('--proxy') + 1] == 'http://127.0.0.1:7890'
+    captured = []
+
+    class FakeOpener:
+        def open(self, req, timeout=None): raise RuntimeError('offline')
+
+    ns['build_opener'] = lambda *handlers: (captured.extend(handlers), FakeOpener())[1]
+    jar = ns['MozillaCookieJar']()
+    proxies['bilibili'] = ''
+    try: ns['bilibili_request']('https://api.bilibili.com/x/web-interface/nav', jar)
+    except Exception: pass
+    assert not any(isinstance(h, ns['ProxyHandler']) for h in captured)
+    captured.clear()
+    proxies['bilibili'] = 'socks5://127.0.0.1:1080'
+    try: ns['bilibili_request']('https://api.bilibili.com/x/web-interface/nav', jar)
+    except Exception: pass
+    handlers = [h for h in captured if isinstance(h, ns['ProxyHandler'])]
+    assert len(handlers) == 1 and handlers[0].proxies == {'http': 'socks5://127.0.0.1:1080', 'https': 'socks5://127.0.0.1:1080'}
+    proxies['bilibili'] = proxies['youtube'] = ''
     for code, state in [(86090, 'scanned'), (86038, 'expired'), (86101, 'waiting')]:
         ns['QR_SESSIONS']['test'] = {'created': ns['time'].time(), 'key': 'test', 'jar': jar}
         with patch.dict(ns, bilibili_request=lambda *a, code=code: io.BytesIO(json.dumps({'data': {'code': code}}).encode())):
