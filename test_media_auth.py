@@ -2,6 +2,7 @@ import ast, base64, io, json, os, sys, tempfile, zipfile
 from pathlib import Path
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from unittest.mock import patch
+from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).parent))
 import stream_metadata as m
 with tempfile.TemporaryDirectory() as tmp:
@@ -140,13 +141,37 @@ with tempfile.TemporaryDirectory() as tmp:
     sdr={'url':'https://example.test/s','vcodec':'h264','dynamic_range':'SDR'}
     audio={'url':'https://example.test/a','vcodec':'none','acodec':'ec-3','asr':48000,'audio_channels':6}
     aac={'url':'https://example.test/b','vcodec':'none','acodec':'mp4a.40.2'}
-    assert not hasattr(m,'subprocess') and not hasattr(m,'probe_format')
-    m.enrich_formats({'formats':[video,sdr,audio,aac]})
+    assert not hasattr(m,'probe_format')
+    with patch.object(m,'subprocess') as fake_probe:
+        fake_probe.run.side_effect = AssertionError('enrich_formats 不应调用 ffprobe')
+        m.enrich_formats({'formats':[video,sdr,audio,aac]})
     assert video['bit_depth']==10 and video['fps']==59.94
     assert sdr['bit_depth']==8 and 'dolby' not in sdr
     assert audio['dolby']=='Dolby Digital Plus' and aac['dolby']=='无'
     assert m.bit_depth_from_dynamic_range('') is None and m.bit_depth_from_dynamic_range('HLG')==10
     assert m.dolby_from_codec('opus')=='无'
+    # 只探最高音质那一条：码流里带 Atmos 才补 / Atmos 后缀。
+    high={'url':'https://example.test/atmos','vcodec':'none','acodec':'ec-3','abr':256,'asr':48000,'audio_channels':6,'format_id':'380'}
+    low={'url':'https://example.test/low','vcodec':'none','acodec':'mp4a.40.2','abr':128,'asr':44100,'audio_channels':2,'format_id':'140'}
+    probe_info={'formats':[low,high]}
+    m.enrich_formats(probe_info)
+    seen={}
+    def fake_ffprobe(args,**kwargs):
+        seen['args']=args; seen['env']=kwargs.get('env') or {}
+        return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps({'streams':[
+            {'codec_type':'audio','codec_name':'eac3','profile':'Dolby Digital Plus + Dolby Atmos','channels':6,'sample_rate':'48000'}]}))
+    with patch.object(m,'subprocess') as fake_probe:
+        fake_probe.run.side_effect = fake_ffprobe
+        summary = m.probe_best_audio(probe_info, 'http://127.0.0.1:7890')
+    assert summary['id']=='380' and summary['dolby']=='Dolby Digital Plus / Atmos', summary
+    assert high['dolby']=='Dolby Digital Plus / Atmos' and low['dolby']=='无'
+    assert seen['args'][-1]==high['url'] and seen['env'].get('http_proxy')=='http://127.0.0.1:7890'
+    assert m.best_audio(probe_info) is high
+    with patch.object(m,'subprocess') as fake_probe:
+        fake_probe.run.side_effect = lambda *a, **k: SimpleNamespace(returncode=1, stdout='', stderr='boom')
+        assert m.probe_best_audio(probe_info) is None
+        assert high['dolby']=='Dolby Digital Plus / Atmos'
+        assert m.probe_best_audio({'formats':[{'acodec':'mp4a.40.2','vcodec':'none'}]}) is None
     assert ns['formats']({'formats':[video,audio]})['formats'][0]['bit_depth']==10
     ns['log_event']('system','offline self-test entry')
     assert isinstance(ns['LOGS'][-1]['ts'],float) and ns['LOGS'][-1]['time']

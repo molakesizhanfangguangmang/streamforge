@@ -3,7 +3,7 @@ import base64, binascii, collections, html, json, os, re, shutil, signal, socket
 from xml.etree.ElementTree import Element, SubElement, ElementTree, ParseError, fromstring
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor, ProxyHandler, HTTPError, URLError
 from http.cookiejar import MozillaCookieJar, CookieJar
-from stream_metadata import enrich_formats
+from stream_metadata import enrich_formats, probe_best_audio
 from urllib.parse import urlencode, parse_qs
 try:
     import qrcode
@@ -838,11 +838,15 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path; body = self.body()
         if path == '/api/inspect':
             log_event('parse', '开始解析媒体地址')
+            platform = body.get('platform', 'bilibili')
             try:
-                result = subprocess.run(ytdlp_args(['--dump-single-json', '--skip-download', body['url']], body.get('platform', 'bilibili')), capture_output=True, text=True, timeout=180)
+                result = subprocess.run(ytdlp_args(['--dump-single-json', '--skip-download', body['url']], platform), capture_output=True, text=True, timeout=180)
                 if result.returncode == 0:
                     log_event('parse', '解析完成')
-                    return response(self, 200, formats(enrich_formats(json.loads(result.stdout))))
+                    info = enrich_formats(json.loads(result.stdout))
+                    probed = probe_best_audio(info, config.get('proxies', {}).get(platform, ''))
+                    log_event('parse', f"最高音质 {probed['id']} 码流探测：{probed['dolby']}（{probed['elapsed']}s）" if probed else '最高音质码流探测未取到结果，沿用编码推导值')
+                    return response(self, 200, formats(info))
                 log_event('error', '解析失败', 'error')
                 return response(self, 422, {'error': friendly_error(result.stderr)})
             except Exception as exc: return response(self, 500, {'error': str(exc)})
