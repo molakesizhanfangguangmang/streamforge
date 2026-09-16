@@ -85,7 +85,9 @@ with tempfile.TemporaryDirectory() as tmp:
     norm = ns['normalize_proxies']
     assert norm({'youtube': ' http://127.0.0.1:7890 ', 'bilibili': '', 'junk': 'x'}) == {'youtube': 'http://127.0.0.1:7890', 'bilibili': ''}
     assert norm({'bilibili': 'socks5h://10.0.0.1:1080'}) == {'bilibili': 'socks5h://10.0.0.1:1080'}
-    for bad in ({'youtube': '127.0.0.1:7890'}, {'youtube': 'ftp://127.0.0.1'}, {'bilibili': 'http://a b'}, ['x']):
+    assert norm({'youtube': '127.0.0.1:7890'}) == {'youtube': 'http://127.0.0.1:7890'}
+    assert norm({'youtube': '"http://127.0.0.1:7890/"'}) == {'youtube': 'http://127.0.0.1:7890'}
+    for bad in ({'youtube': 'ftp://127.0.0.1'}, {'bilibili': 'http://a b'}, {'bilibili': 'http://127.0.0.1:7890/path'}, {'youtube': 7890}, ['x']):
         try:
             norm(bad); raise AssertionError(f'未拦截：{bad}')
         except ValueError: pass
@@ -115,7 +117,9 @@ with tempfile.TemporaryDirectory() as tmp:
     norm = ns['normalize_proxies']
     assert norm({'youtube': ' http://127.0.0.1:7890 ', 'bilibili': '', 'junk': 'x'}) == {'youtube': 'http://127.0.0.1:7890', 'bilibili': ''}
     assert norm({'bilibili': 'socks5h://10.0.0.1:1080'}) == {'bilibili': 'socks5h://10.0.0.1:1080'}
-    for bad in ({'youtube': '127.0.0.1:7890'}, {'youtube': 'ftp://127.0.0.1'}, {'bilibili': 'http://a b'}, ['x']):
+    assert norm({'youtube': '127.0.0.1:7890'}) == {'youtube': 'http://127.0.0.1:7890'}
+    assert norm({'youtube': '"http://127.0.0.1:7890/"'}) == {'youtube': 'http://127.0.0.1:7890'}
+    for bad in ({'youtube': 'ftp://127.0.0.1'}, {'bilibili': 'http://a b'}, {'bilibili': 'http://127.0.0.1:7890/path'}, {'youtube': 7890}, ['x']):
         try:
             norm(bad); raise AssertionError(f'未拦截：{bad}')
         except ValueError: pass
@@ -131,18 +135,24 @@ with tempfile.TemporaryDirectory() as tmp:
     nfo_dir.mkdir()
     ns['write_nfo'](nfo_dir, {'title': 'test', 'url': 'https://example.test/v', 'format': 'v+a', 'source_info': {'id': 'x', 'uploader': 'u'}})
     assert '<title>test</title>' in (nfo_dir / 'metadata.nfo').read_text()
-    def probe(stream, fmt):
-        class P: returncode=0; stdout=json.dumps({'streams':[stream]})
-        with patch.object(m.subprocess, 'run', return_value=P()): m.probe_format({},fmt)
-    video={'url':'https://example.test/v','vcodec':'hevc'}
-    probe({'codec_type':'video','avg_frame_rate':'60000/1001','pix_fmt':'yuv420p10le','color_transfer':'smpte2084'},video)
-    assert abs(video['fps']-59.94)<.001 and video['bit_depth']==10 and video['dynamic_range']=='HDR10 (PQ)'
-    probe({'codec_type':'video','avg_frame_rate':'60/1','pix_fmt':'yuv420p10le','side_data_list':[{'side_data_type':'DOVI configuration record'}]},video)
-    assert video['dolby']=='Dolby Vision'
-    audio={'url':'https://example.test/a','vcodec':'none'}
-    probe({'codec_type':'audio','codec_name':'eac3','sample_rate':'48000','channels':6},audio)
-    assert audio['asr']==48000 and audio['audio_channels']==6 and audio['dolby']=='Dolby Digital Plus'
+    # Stream metadata comes from the extractor payload only: no ffprobe, no network.
+    video={'url':'https://example.test/v','vcodec':'hevc','dynamic_range':'HDR10','fps':59.94}
+    sdr={'url':'https://example.test/s','vcodec':'h264','dynamic_range':'SDR'}
+    audio={'url':'https://example.test/a','vcodec':'none','acodec':'ec-3','asr':48000,'audio_channels':6}
+    aac={'url':'https://example.test/b','vcodec':'none','acodec':'mp4a.40.2'}
+    assert not hasattr(m,'subprocess') and not hasattr(m,'probe_format')
+    m.enrich_formats({'formats':[video,sdr,audio,aac]})
+    assert video['bit_depth']==10 and video['fps']==59.94
+    assert sdr['bit_depth']==8 and 'dolby' not in sdr
+    assert audio['dolby']=='Dolby Digital Plus' and aac['dolby']=='无'
+    assert m.bit_depth_from_dynamic_range('') is None and m.bit_depth_from_dynamic_range('HLG')==10
+    assert m.dolby_from_codec('opus')=='无'
     assert ns['formats']({'formats':[video,audio]})['formats'][0]['bit_depth']==10
+    ns['log_event']('system','offline self-test entry')
+    assert isinstance(ns['LOGS'][-1]['ts'],float) and ns['LOGS'][-1]['time']
+    assert ns['test_proxy']('youtube','')['ok'] is False
+    refused=ns['test_proxy']('youtube','http://127.0.0.1:9')
+    assert refused['ok'] is False and refused['steps'][-1]['name']=='代理端口'
     def plugin_zip(entries):
         output = io.BytesIO()
         with zipfile.ZipFile(output, 'w') as archive:

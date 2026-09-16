@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import base64, binascii, collections, json, os, re, shutil, signal, subprocess, threading, time, uuid, zipfile, tempfile, io
+import base64, binascii, collections, json, os, re, shutil, signal, socket, subprocess, threading, time, uuid, zipfile, tempfile, io
 from xml.etree.ElementTree import Element, SubElement, ElementTree
-from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor, ProxyHandler
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor, ProxyHandler, HTTPError, URLError
 from http.cookiejar import MozillaCookieJar, CookieJar
 from stream_metadata import enrich_formats
 from urllib.parse import urlencode, parse_qs
@@ -42,7 +42,7 @@ QR_SESSIONS = {}
 jobs = {}
 LOGS = []
 def log_event(kind, message, level='info'):
-    LOGS.append({'time': time.strftime('%H:%M:%S'), 'kind': kind, 'level': level, 'message': message})
+    LOGS.append({'ts': time.time(), 'time': time.strftime('%H:%M:%S'), 'kind': kind, 'level': level, 'message': message})
     del LOGS[:-300]
 log_event('system', 'Streamforge 服务已启动')
 APP_VERSION = os.environ.get('STREAMFORGE_VERSION', '1.0.0')
@@ -367,6 +367,50 @@ def normalize_proxies(value):
         if key not in ('bilibili', 'youtube'): continue
         result[key] = normalize_proxy(raw, 'YouTube' if key == 'youtube' else 'B站')
     return result
+
+PROXY_TEST_TARGETS = {'youtube': 'https://www.youtube.com/generate_204', 'bilibili': 'https://www.bilibili.com/'}
+PROXY_DEFAULT_PORTS = {'http': 80, 'https': 443}
+
+def test_proxy(platform, normalized):
+    """Check the saved value, the proxy port, then one request through the proxy."""
+    label = 'YouTube' if platform == 'youtube' else 'B站'
+    effective = config.get('proxies', {}).get(platform, '')
+    if not normalized:
+        return {'platform': platform, 'input': '', 'effective': effective, 'in_effect': not effective, 'ok': False,
+                'steps': [{'name': '保存生效', 'ok': False, 'detail': f'没有填写{label}代理'}]}
+    in_effect = normalized == effective
+    report = {'platform': platform, 'input': normalized, 'effective': effective, 'in_effect': in_effect, 'ok': False,
+              'steps': [{'name': '保存生效', 'ok': in_effect,
+                         'detail': f'与服务端当前生效值一致（{effective}）' if in_effect else
+                                   f'尚未保存，服务端当前生效值是 {effective or "空"}；保存后才作用于解析与下载'}]}
+    parsed = urlparse(normalized)
+    host, port = parsed.hostname or '', parsed.port or PROXY_DEFAULT_PORTS.get(parsed.scheme, 1080)
+    started = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=5): pass
+        report['steps'].append({'name': '代理端口', 'ok': True, 'detail': f'{host}:{port} 可连接', 'ms': int((time.time() - started) * 1000)})
+    except OSError as exc:
+        report['steps'].append({'name': '代理端口', 'ok': False, 'detail': f'{host}:{port} 连接失败：{exc}', 'ms': int((time.time() - started) * 1000)})
+        return report
+    target = PROXY_TEST_TARGETS.get(platform) or PROXY_TEST_TARGETS['bilibili']
+    netloc = urlparse(target).netloc
+    if parsed.scheme not in ('http', 'https'):
+        report['steps'].append({'name': '访问目标站', 'ok': None,
+                                'detail': f'{parsed.scheme} 代理无法在服务端验证目标站访问（未内置 SOCKS 客户端），仅确认端口连通'})
+        return report
+    started = time.time()
+    try:
+        opener = build_opener(ProxyHandler({'http': normalized, 'https': normalized}))
+        with opener.open(Request(target, headers={'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache'}), timeout=12) as resp:
+            code = getattr(resp, 'status', None) or resp.getcode()
+        report['steps'].append({'name': '访问目标站', 'ok': True, 'detail': f'{netloc} 返回 HTTP {code}', 'ms': int((time.time() - started) * 1000)})
+        report['ok'] = True
+    except HTTPError as exc:
+        report['steps'].append({'name': '访问目标站', 'ok': exc.code < 500, 'detail': f'{netloc} 返回 HTTP {exc.code}', 'ms': int((time.time() - started) * 1000)})
+        report['ok'] = exc.code < 500
+    except (URLError, OSError, ValueError) as exc:
+        report['steps'].append({'name': '访问目标站', 'ok': False, 'detail': f'{type(exc).__name__}: {exc}', 'ms': int((time.time() - started) * 1000)})
+    return report
 
 def bilibili_auth():
     path = Path(config.get('cookies', {}).get('bilibili', ''))
@@ -748,6 +792,16 @@ class Handler(BaseHTTPRequestHandler):
                 for jid in removed: jobs.pop(jid, None)
                 save_jobs()
             return response(self, 200, {'ok': True, 'removed': removed})
+        if path == '/api/proxy-test':
+            platform = body.get('platform')
+            if platform not in ('bilibili', 'youtube'): return response(self, 422, {'error': '只能检测 B站或 YouTube 代理'})
+            label = 'YouTube' if platform == 'youtube' else 'B站'
+            try: normalized = normalize_proxy(body.get('value'), label)
+            except ValueError as exc: return response(self, 422, {'error': str(exc)})
+            report = test_proxy(platform, normalized)
+            summary = '；'.join(f'{s["name"]}{"通过" if s["ok"] else "未通过" if s["ok"] is False else "未验证"}：{s["detail"]}' for s in report['steps'])
+            log_event('config', f'{label}代理检测：{summary}', 'info' if report['ok'] else 'error')
+            return response(self, 200, report)
         if path == '/api/download-path':
             try:
                 selected = validate_download_path(body.get('path'))
