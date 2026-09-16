@@ -1,0 +1,21 @@
+[Unit]
+Description=Streamforge restricted update agent
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cyj
+Group=Users
+Environment=STREAMFORGE_UPDATE_BIND=172.21.0.1
+Environment=STREAMFORGE_UPDATE_PORT=19081
+Environment=STREAMFORGE_UPDATE_TOKEN_FILE=/vol1/1000/claw/streamforge/data/update-agent.token
+Environment=STREAMFORGE_APP_DIR=/vol1/1000/claw/streamforge
+ExecStart=/usr/bin/python3 /vol1/1000/claw/streamforge/update_agent.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

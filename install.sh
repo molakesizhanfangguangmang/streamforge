@@ -20,6 +20,14 @@ node_source=none
 node_host_path=''
 node_data_path=''
 
+PORT=${STREAMFORGE_PORT:-}
+if [ -z "$PORT" ]; then
+  printf '流铸访问端口 [8081] '; read PORT || PORT=''
+  PORT=${PORT:-8081}
+fi
+case "$PORT" in *[!0-9]*|'') say '端口必须为 1 到 65535 的整数'; exit 1;; esac
+[ "$PORT" -ge 1 ] 2>/dev/null && [ "$PORT" -le 65535 ] 2>/dev/null || { say '端口必须为 1 到 65535'; exit 1; }
+
 mkdir -p "$DATA_DIR" "$DOWNLOAD_DIR" "$PLUGIN_DIR"
 
 if host_node=$(find_node 2>/dev/null); then
@@ -57,14 +65,30 @@ if [ "$node_source" = none ]; then
   fi
 fi
 
+IMAGE=${STREAMFORGE_IMAGE:-ghcr.io/molakesizhanfangguangmang/streamforge:latest}
+ARCHIVE=${STREAMFORGE_IMAGE_ARCHIVE:-}
+
+if [ -n "$ARCHIVE" ]; then
+  [ -f "$ARCHIVE" ] || { say "找不到镜像归档：$ARCHIVE"; exit 1; }
+  case "$ARCHIVE" in
+    *.tar.zst) zstd -dc "$ARCHIVE" | docker load ;;
+    *.tar) docker load -i "$ARCHIVE" ;;
+    *) say '镜像归档必须为 .tar 或 .tar.zst'; exit 1 ;;
+  esac
+  IMAGE=${STREAMFORGE_IMAGE_NAME:-streamforge:latest}
+elif ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  say "拉取 ARM64 镜像：$IMAGE"
+  docker pull "$IMAGE"
+fi
+
 cat > "$COMPOSE_FILE" <<EOF
 services:
   streamforge:
-    build: .
+    image: ${IMAGE}
     container_name: streamforge
     restart: unless-stopped
     ports:
-      - "${STREAMFORGE_PORT:-8081}:8081"
+      - "${PORT}:8081"
     environment:
       STREAMFORGE_DATA: /data
       STREAMFORGE_DOWNLOADS: /downloads
@@ -83,8 +107,8 @@ fi
 
 say "使用 Compose 配置：$COMPOSE_FILE"
 if command -v docker >/dev/null 2>&1; then
-  docker compose -f "$COMPOSE_FILE" up -d --build
-  say "流铸已启动：http://127.0.0.1:${STREAMFORGE_PORT:-8081}"
+  docker compose -f "$COMPOSE_FILE" up -d
+  say "流铸已启动：http://127.0.0.1:${PORT}"
 else
   say '未找到 Docker，请安装 Docker Compose 后重新运行。'
   exit 1
