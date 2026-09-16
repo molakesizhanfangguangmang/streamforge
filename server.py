@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import base64, binascii, collections, json, os, re, shutil, signal, socket, subprocess, threading, time, uuid, zipfile, tempfile, io
-from xml.etree.ElementTree import Element, SubElement, ElementTree
+import base64, binascii, collections, html, json, os, re, shutil, signal, socket, subprocess, threading, time, uuid, zipfile, tempfile, io
+from xml.etree.ElementTree import Element, SubElement, ElementTree, ParseError, fromstring
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor, ProxyHandler, HTTPError, URLError
 from http.cookiejar import MozillaCookieJar, CookieJar
 from stream_metadata import enrich_formats
@@ -34,7 +34,7 @@ JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----'''
 LOCK = threading.RLock()
 processes = {}
-config = {'concurrency': 2, 'metadata': False, 'queue_mode': False, 'download_path': '/downloads',
+config = {'concurrency': 2, 'metadata': False, 'thumbnail_jpg': True, 'queue_mode': False, 'download_path': '/downloads',
           'cookies': {'bilibili': str(ROOT / 'cookies' / 'bilibili.txt'), 'youtube': ''},
           'proxies': {'bilibili': '', 'youtube': ''},
           'update_check_days': 7, 'update_cache': {}}
@@ -675,16 +675,87 @@ def validate_download_path(value):
         raise ValueError(f'目录不可写：{candidate}（{exc.strerror or exc}）')
     return candidate
 
-def write_nfo(folder, job):
+MEDIA_EXTENSIONS = {'.mp4', '.m4v', '.mkv', '.webm', '.mov', '.avi', '.flv', '.ts', '.mpg', '.mpeg', '.wmv',
+                    '.mp3', '.m4a', '.aac', '.flac', '.opus', '.ogg', '.wav'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
+
+def xml_text(value):
+    return str(value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+def xml_attribute(value):
+    return xml_text(value).replace('"', '&quot;')
+
+def cdata(value):
+    # ']]>' cannot appear inside a CDATA section; split it into two sections.
+    return '<![CDATA[' + str(value).replace(']]>', ']]]]><![CDATA[>') + ']]>'
+
+def plot_markup(description, website, label):
+    """Render the description the way bili-sync does: HTML inside CDATA, newlines as <br/>, links clickable."""
+    text = html.unescape(str(description or '')).replace('\r\n', '\n').replace('\r', '\n').strip()
+    text = xml_text(text)
+    text = re.sub(r'(https?://[^\s<>"\']+)', lambda m: '<a href="%s">%s</a>' % (m.group(1), m.group(1)), text)
+    text = text.replace('\n', '<br/>')
+    prefix = '原始视频：<a href="%s">%s</a><br/><br/>' % (xml_attribute(website), xml_text(label)) if website else ''
+    return prefix + text
+
+def media_file(folder, tail):
+    """Find the file yt-dlp ended up writing so sidecars can reuse its base name."""
+    for line in reversed(list(tail or [])):
+        match = re.search(r'Merging formats into "([^"]+)"', line)
+        if match:
+            candidate = Path(match.group(1))
+            if candidate.is_file(): return candidate
+    candidates = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in MEDIA_EXTENSIONS]
+    return max(candidates, key=lambda p: p.stat().st_size) if candidates else None
+
+def place_cover(folder, stem):
+    """Rename the downloaded thumbnail to the poster/fanart sidecar names media libraries match on."""
+    for candidate in sorted(folder.glob(stem + '.*')):
+        if candidate.suffix.lower() not in IMAGE_EXTENSIONS or not candidate.is_file(): continue
+        if candidate.stem.endswith(('-poster', '-fanart')): continue
+        poster = folder / (stem + '-poster' + candidate.suffix.lower())
+        fanart = folder / (stem + '-fanart' + candidate.suffix.lower())
+        candidate.replace(poster)
+        shutil.copyfile(poster, fanart)
+        return poster, fanart
+    return None, None
+
+def write_nfo(folder, job, stem=None):
     info = job.get('source_info') if isinstance(job.get('source_info'), dict) else {}
-    root = Element('movie')
-    fields = {'title': job.get('title'), 'originaltitle': job.get('title'), 'website': job.get('url'),
-              'uniqueid': info.get('id'), 'premiered': info.get('upload_date'), 'studio': info.get('uploader'),
-              'plot': info.get('description')}
-    for name, value in fields.items():
-        if value not in (None, ''): SubElement(root, name).text = str(value)
-    SubElement(root, 'streamforge_format').text = str(job.get('format', ''))
-    ElementTree(root).write(folder / 'metadata.nfo', encoding='utf-8', xml_declaration=True)
+    website = str(job.get('url') or '')
+    lines = ['<?xml version="1.0" encoding="utf-8" standalone="yes"?>', '<movie>']
+    for name, value in (('title', job.get('title')), ('originaltitle', job.get('title')), ('website', website),
+                        ('premiered', info.get('upload_date')), ('studio', info.get('uploader'))):
+        if value not in (None, ''): lines.append('  <%s>%s</%s>' % (name, xml_text(value), name))
+    if info.get('id'):
+        lines.append('  <uniqueid type="%s">%s</uniqueid>' % (xml_attribute(job.get('platform') or 'bilibili'), xml_text(info['id'])))
+    plot = plot_markup(info.get('description'), website, info.get('id') or job.get('title'))
+    if plot: lines.append('  <plot>%s</plot>' % cdata(plot))
+    lines.append('  <streamforge_format>%s</streamforge_format>' % xml_text(job.get('format') or ''))
+    lines.append('</movie>')
+    document = '\n'.join(lines) + '\n'
+    try:
+        fromstring(document)
+    except ParseError:
+        # Never leave an unreadable nfo behind: fall back to the raw text without markup.
+        plain = xml_text(html.unescape(str(info.get('description') or '')).strip())
+        index = next((i for i, line in enumerate(lines) if '<plot>' in line), None)
+        if index is not None:
+            if plain: lines[index] = '  <plot>%s</plot>' % plain
+            else: lines.pop(index)
+        document = '\n'.join(lines) + '\n'
+        fromstring(document)
+    (folder / ((stem or 'metadata') + '.nfo')).write_text(document, encoding='utf-8')
+
+def finalize_metadata(folder, job, tail):
+    try:
+        media = media_file(folder, tail)
+        stem = media.stem if media else 'metadata'
+        poster, _ = place_cover(folder, stem)
+        write_nfo(folder, job, stem)
+        log_event('download', '已写入封面 %s 与 %s.nfo' % (poster.name, stem) if poster else '已写入 %s.nfo' % stem)
+    except Exception as exc:
+        log_event('download', '封面或元数据写入失败：%s' % exc, 'error')
 
 def run_download(job):
     jid = job['id']; job['status'] = 'running'; job['started_at'] = time.time(); save_jobs()
@@ -693,7 +764,8 @@ def run_download(job):
         output = str(folder / '%(title)s.%(ext)s')
         args = ['-f', job['format'], '-o', output]
         if job.get('metadata'):
-            args += ['--write-info-json']
+            args += ['--write-info-json', '--write-thumbnail']
+            if config.get('thumbnail_jpg', True): args += ['--convert-thumbnails', 'jpg']
         args += [job['url']]
         proc = subprocess.Popen(ytdlp_args(args, job.get('platform', 'bilibili')), stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -711,7 +783,7 @@ def run_download(job):
             job['status'] = 'cancelled' if job.get('cancel_requested') else 'done' if rc == 0 else 'error'
             job['returncode'] = rc
             if rc != 0 and not job.get('cancel_requested'): job['error'] = friendly_error('\n'.join(tail))
-            if rc == 0 and job.get('metadata'): write_nfo(folder, job)
+            if rc == 0 and job.get('metadata'): finalize_metadata(folder, job, tail)
         save_jobs()
     except Exception as exc:
         job['status'] = 'error'; job['error'] = friendly_error(str(exc)); save_jobs()
@@ -823,6 +895,10 @@ class Handler(BaseHTTPRequestHandler):
                     for key, value in normalized.items():
                         label = 'YouTube' if key == 'youtube' else 'B站'
                         log_event('config', f'{label}代理已{"设为 " + value if value else "清除"}，之后的解析与下载立即生效')
+                if 'thumbnail_jpg' in body:
+                    if not isinstance(body['thumbnail_jpg'], bool):
+                        return response(self, 422, {'error': '封面转换开关只能是开或关'})
+                    config['thumbnail_jpg'] = body['thumbnail_jpg']
                 config.update({k: v for k, v in body.items() if k in ('concurrency', 'metadata', 'queue_mode', 'download_path', 'cookies')}); save_config()
             return response(self, 200, config)
         if path == '/api/bilibili/qr/start':
