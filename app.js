@@ -6,22 +6,31 @@ function escapeHtml(value){return String(value).replace(/[&<>"']/g,c=>({'&':'&am
 function known(value){return value!==null&&value!==undefined&&String(value).trim()!==''}
 function display(value,unit=''){return known(value)?escapeHtml(value)+unit:'未知'}
 function fmtSize(n){return known(n)&&Number.isFinite(Number(n))&&Number(n)>=0?`${(Number(n)/1048576).toFixed(1)} MB`:'未知'}
+function metric(value){const n=Number(value);return Number.isFinite(n)?n:-1}
+function streamScore(row,type){
+  if(type==='audio')return [metric(row.abr),metric(row.audio_channels),metric(row.asr),metric(row.size)];
+  const height=String(row.resolution??'').match(/\d+x(\d+)/);
+  return [metric(height?height[1]:row.height),metric(row.fps),metric(known(row.tbr)?row.tbr:row.abr),metric(row.size)];
+}
+function betterScore(a,b){const n=Math.max(a.length,b.length);for(let i=0;i<n;i++){const x=a[i]??-1,y=b[i]??-1;if(x!==y)return x>y?1:-1}return 0}
+function formatsOf(type){return currentInfo?currentInfo.formats.filter(x=>x.kind===type):[]}
+function bestIndex(rows,type){let best=-1,bestScore=null;rows.forEach((row,i)=>{const score=streamScore(row,type);if(best<0||betterScore(score,bestScore)>0){best=i;bestScore=score}});return best}
 function renderRows(target,rows,type){
-  const video=type==='video';
+  const video=type==='video';const best=bestIndex(rows,type);
   target.innerHTML=rows.map((r,i)=>{
     const bitrate=known(r.tbr)?r.tbr:r.abr;
     const cells=video
       ?[display(r.resolution),display(r.vcodec),display(r.fps,' fps'),display(r.bit_depth,' bit'),display(r.dynamic_range),fmtSize(r.size)]
       :[display(bitrate,' kbps'),display(r.acodec),display(r.asr,' Hz'),display(r.audio_channels),display(r.dolby),fmtSize(r.size)];
-    return `<tr><td><input type="radio" name="${type}-format" value="${escapeHtml(r.id??'')}" ${i===0?'checked':''}></td><td>${display(r.id)}</td>${cells.map((cell,j)=>`<td${j===0?' class="format-quality"':''}>${j===1?`<span class="codec">${cell}</span>`:cell}</td>`).join('')}</tr>`;
-  }).join('')||`<tr class="table-empty"><td colspan="${video?9:8}">没有可用流</td></tr>`;
+    return `<tr><td><input type="radio" name="${type}-format" value="${escapeHtml(r.id??'')}" ${i===best?'checked':''}></td><td>${display(r.id)}</td>${cells.map((cell,j)=>`<td${j===0?' class="format-quality"':''}>${j===1?`<span class="codec">${cell}</span>`:cell}</td>`).join('')}</tr>`;
+  }).join('')||`<tr class="table-empty"><td colspan="8">没有可用流</td></tr>`;
 }
 function renderFormats(info){currentInfo=info;const v=info.formats.filter(x=>x.kind==='video'),a=info.formats.filter(x=>x.kind==='audio');renderRows($('#video-rows'),v,'video');renderRows($('#audio-rows'),a,'audio');$('#video-count').textContent=`视频 ${v.length}`;$('#audio-count').textContent=`音频 ${a.length}`}
 function selectView(view){$$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$$('.view').forEach(v=>v.classList.toggle('active',v.id===`${view}-view`))}
 $$('.nav-item').forEach(b=>b.addEventListener('click',()=>selectView(b.dataset.view)));$$('[data-view-target]').forEach(b=>b.addEventListener('click',()=>selectView(b.dataset.viewTarget)));
 $$('.source-btn').forEach(btn=>btn.addEventListener('click',()=>{$$('.source-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');currentPlatform=btn.dataset.platform;const yt=currentPlatform==='youtube';$('#url').placeholder=yt?'粘贴 YouTube 视频链接':'粘贴 B站视频链接';$('#cookie-hint').textContent=`将使用 ${yt?'YouTube':'B站'} Cookie 配置`;$('#parse-hint').classList.toggle('hidden',!yt)}));
 $('#parse-btn').addEventListener('click',async()=>{const url=$('#url').value.trim();if(!url){$('#url').focus();showToast('请先输入媒体地址');return}$('#parse-btn').disabled=true;$('#parse-btn').textContent='解析中…';try{const r=await fetch('/api/inspect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,platform:currentPlatform})});const d=await r.json();if(!r.ok)throw Error(d.error||'解析失败');renderFormats(d);showToast(`解析完成：抓到 ${d.formats.filter(x=>x.kind==='video').length} 个视频流、${d.formats.filter(x=>x.kind==='audio').length} 个音频流`)}catch(e){showToast(e.message)}finally{$('#parse-btn').disabled=false;$('#parse-btn').innerHTML='⌕&nbsp; 开始解析'}});
-$$('[data-select]').forEach(b=>b.addEventListener('click',()=>{const input=$(`input[name="${b.dataset.select}-format"]`);if(!input){showToast('请先解析媒体地址');return}input.checked=true;showToast(`已选最高${b.dataset.select==='video'?'画质':'音质'}`)}));
+$$('[data-select]').forEach(b=>b.addEventListener('click',()=>{const type=b.dataset.select;if(!currentInfo){showToast('请先解析媒体地址');return}const list=formatsOf(type),index=bestIndex(list,type),row=index>=0?list[index]:null;if(!row){showToast('没有可用流');return}const input=[...$$(`input[name="${type}-format"]`)].find(x=>x.value===String(row.id??''));if(!input){showToast('没有可用流');return}input.checked=true;input.closest('tr')?.scrollIntoView({block:'nearest'});showToast(`已选最高${type==='video'?'画质':'音质'}：${row.id??'未知'}${type==='video'&&row.resolution?`（${row.resolution}）`:''}${type==='audio'&&known(row.abr)?`（${row.abr} kbps）`:''}`)}));
 function queueMode(){return $('#queue-mode').checked}async function createJob(kind){if(!currentInfo){showToast('请先解析媒体地址');return}const v=$('input[name="video-format"]:checked'),a=$('input[name="audio-format"]:checked');const format=kind==='best'?(v&&a?`${v.value}+${a.value}`:v?.value||a?.value):kind==='video'?v?.value:a?.value;if(!format){showToast('请先选择对应的流');return}try{const r=await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:currentInfo.webpage_url||$('#url').value,format,title:currentInfo.title,source_info:currentInfo,platform:currentPlatform,metadata:$('#metadata').checked})});if(!r.ok)throw Error('任务创建失败');showToast(queueMode()?'已加入下载列表':'已提交下载任务');selectView('queue')}catch(e){showToast(e.message)}}
 function actionMessage(kind){createJob(kind)}
 $$('[data-action]').forEach(b=>b.addEventListener('click',()=>actionMessage(b.dataset.action)));
@@ -173,11 +182,24 @@ async function refreshAuth(){
     if(note)note.textContent=data.youtube_configured
       ?`有效 ${data.youtube_valid} 条 · 已过期 ${data.youtube_expired} 条 · ${login}${stale.length?`（已过期：${stale.join('、')}）`:''}${data.youtube_nearest_expiry?` · 登录组最近到期 ${stamp(data.youtube_nearest_expiry)}`:''} · 保存于 ${stamp(data.youtube_saved_at)}${data.youtube_error?` · ${data.youtube_error}`:''}`
       :`${data.youtube_error||'尚未配置 YouTube Cookie'}。${note.dataset.base}`;
-  }catch(error){if(version!==authVersion)return;status.textContent='状态未知';status.classList.remove('verified');status.title=error.message;account.textContent='';account.classList.add('hidden');$('#youtube-status').textContent='状态未知'}
+    return data;
+  }catch(error){if(version!==authVersion)return null;status.textContent='状态未知';status.classList.remove('verified');status.title=error.message;account.textContent='';account.classList.add('hidden');$('#youtube-status').textContent='状态未知';return null}
 }
+function authSummary(data){
+  if(!data)return '认证状态读取失败';
+  const bili=data.bilibili===true?'B站 已认证':data.bilibili_configured===true?'B站 已配置，未验证':data.bilibili_configured===false?'B站 未配置':'B站 状态未知';
+  const youtube=data.youtube_configured===true?`YouTube 有效 ${data.youtube_valid} 条`:data.youtube_configured===false?'YouTube 未配置':'YouTube 状态未知';
+  return `${bili} · ${youtube}`;
+}
+async function manualAuthCheck(button){
+  const label=button.textContent;button.disabled=true;button.textContent='检测中…';
+  try{showToast(authSummary(await refreshAuth()))}finally{button.disabled=false;button.textContent=label}
+}
+$('#bilibili-check')?.addEventListener('click',()=>manualAuthCheck($('#bilibili-check')));
+$('#youtube-check')?.addEventListener('click',()=>manualAuthCheck($('#youtube-check')));
 function logStamp(ts,fallback){if(!ts)return display(fallback);const d=new Date(ts*1000);return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`}
 async function refreshLogs(){try{const d=await (await fetch('/api/logs')).json();const box=$('#log-box');if(!box)return;box.innerHTML=d.length?d.map(x=>`<div data-log-kind="${escapeHtml(x.kind??'')}" data-log-level="${escapeHtml(x.level??'')}"><time>${logStamp(x.ts,x.time)}</time><span class="log-${escapeHtml(x.level??'')}">${display(x.message)}</span></div>`).join(''):'<div><span class="log-muted">暂无日志</span></div>'}catch(e){}}
-refreshAuth();refreshLogs();setInterval(refreshAuth,5000);setInterval(refreshLogs,3000);$$('.log-filter').forEach(f=>f.addEventListener('click',()=>{$$('.log-filter').forEach(x=>x.classList.remove('active'));f.classList.add('active');const key=f.textContent.trim();$$('#log-box>div').forEach(row=>row.style.display=key==='全部'||(key==='错误'&&row.dataset.logLevel==='error')||(key==='解析'&&row.dataset.logKind==='parse')||(key==='下载'&&row.dataset.logKind==='download')?'flex':'none')}));$('#clear-logs')?.addEventListener('click',async()=>{await fetch('/api/logs',{method:'DELETE'});refreshLogs();showToast('日志已清空')});
+refreshAuth();refreshLogs();setInterval(refreshAuth,3600000);setInterval(refreshLogs,3000);$$('.log-filter').forEach(f=>f.addEventListener('click',()=>{$$('.log-filter').forEach(x=>x.classList.remove('active'));f.classList.add('active');const key=f.textContent.trim();$$('#log-box>div').forEach(row=>row.style.display=key==='全部'||(key==='错误'&&row.dataset.logLevel==='error')||(key==='解析'&&row.dataset.logKind==='parse')||(key==='下载'&&row.dataset.logKind==='download')?'flex':'none')}));$('#clear-logs')?.addEventListener('click',async()=>{await fetch('/api/logs',{method:'DELETE'});refreshLogs();showToast('日志已清空')});
 
 function queueStatus(status){return {waiting:'等待开始',queued:'等待中',running:'下载中',paused:'已暂停',done:'已完成',error:'失败',cancelled:'已取消'}[status]||status}
 function renderQueue(data){const jobs=data.jobs||[],list=$('.task-list'),active=jobs.filter(j=>j.status==='running'),waiting=jobs.filter(j=>j.status==='waiting'||j.status==='queued'),paused=jobs.filter(j=>j.status==='paused');document.querySelectorAll('.queue-stats b').forEach((el,i)=>el.textContent=[active.length,waiting.length,paused.length][i]);$('#nav-count').textContent=active.length+waiting.length+paused.length;$('#start-all').disabled=!jobs.some(j=>j.status==='waiting');$('#start-all').textContent=jobs.some(j=>j.status==='waiting')?'开始下载':'没有等待任务';list.innerHTML=jobs.length?jobs.slice().sort((a,b)=>b.created_at-a.created_at).map(j=>{const action=j.status==='running'?'pause':j.status==='paused'?'resume':null;const pct=Math.max(0,Math.min(100,Number(j.percent)||0));return `<article class="task panel task-${escapeHtml(j.status)}"><div class="task-main"><span class="task-status ${j.status==='running'?'running-dot':''}"></span><div class="task-title"><strong>${display(j.title)}</strong><small>${display(j.format)} · ${queueStatus(j.status)}</small></div><span class="task-percent">${j.status==='waiting'?'等待':pct.toFixed(1)+'%'}</span>${action?`<button class="icon-btn" data-job-action="${action}" data-job-id="${escapeHtml(j.id)}" title="${action==='pause'?'暂停任务':'继续任务'}">${action==='pause'?'Ⅱ':'▶'}</button>`:''}${!['done','error','cancelled'].includes(j.status)?`<button class="icon-btn" data-job-action="cancel" data-job-id="${escapeHtml(j.id)}" title="取消任务">×</button>`:''}</div><div class="task-progress"><span style="width:${pct}%"></span></div><div class="task-bottom"><span>${display(j.log||j.error||'等待任务输出')}</span><span>${display(j.id)}</span></div></article>`}).join(''):'<div class="queue-empty">当前没有下载任务。</div>';const current=active[0]||waiting[0]||paused[0],empty=$('#progress-empty'),panel=$('#progress-active');if(!current){empty.classList.remove('hidden');panel.classList.add('hidden')}else{empty.classList.add('hidden');panel.classList.remove('hidden');panel.querySelector('strong').textContent=current.title||'未命名任务';panel.querySelector('small').textContent=`${current.format||'--'} · ${queueStatus(current.status)}`;panel.querySelector('.percent').textContent=`${Number(current.percent||0).toFixed(1)}%`;panel.querySelector('.progress-track span').style.width=`${Number(current.percent||0)}%`;panel.querySelector('.progress-meta span').textContent=current.log||current.error||queueStatus(current.status)}}
