@@ -27,6 +27,10 @@ if [ -z "$PORT" ]; then
 fi
 case "$PORT" in *[!0-9]*|'') say '端口必须为 1 到 65535 的整数'; exit 1;; esac
 [ "$PORT" -ge 1 ] 2>/dev/null && [ "$PORT" -le 65535 ] 2>/dev/null || { say '端口必须为 1 到 65535'; exit 1; }
+if command -v ss >/dev/null 2>&1 && ss -ltnH | awk '{print $4}' | grep -Eq "(^|:)${PORT}$"; then
+  say "端口 ${PORT} 已被占用，请重新运行并选择其他端口。"
+  exit 1
+fi
 
 mkdir -p "$DATA_DIR" "$DOWNLOAD_DIR" "$PLUGIN_DIR"
 

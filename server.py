@@ -44,6 +44,7 @@ def log_event(kind, message, level='info'):
     LOGS.append({'time': time.strftime('%H:%M:%S'), 'kind': kind, 'level': level, 'message': message})
     del LOGS[:-300]
 log_event('system', 'Streamforge 服务已启动')
+APP_VERSION = os.environ.get('STREAMFORGE_VERSION', '1.0.0')
 NODE_MODE = os.environ.get('STREAMFORGE_NODE', 'none')
 UPDATE_AGENT_URL = os.environ.get('STREAMFORGE_UPDATE_AGENT_URL', '')
 UPDATE_AGENT_TOKEN_FILE = os.environ.get('STREAMFORGE_UPDATE_AGENT_TOKEN_FILE', '')
@@ -348,6 +349,18 @@ def refresh_bilibili_login():
     return {'ok': True, 'requires_refresh': True, 'refreshed': True}
 
 
+def normalized_version(value):
+    return str(value or '').strip().lower().lstrip('v')
+
+def update_status():
+    code, data = update_agent('status')
+    release = data.get('release') if isinstance(data, dict) else None
+    latest = normalized_version(release.get('tag')) if isinstance(release, dict) else ''
+    current = normalized_version(APP_VERSION)
+    data['current_version'] = APP_VERSION
+    data['up_to_date'] = bool(latest and latest == current)
+    return code, data
+
 def update_agent(method):
     if not UPDATE_AGENT_URL or not UPDATE_AGENT_TOKEN_FILE:
         raise ValueError('宿主更新代理未配置')
@@ -483,30 +496,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == '/api/health':
-            return response(self, 200, {'ok': True, 'version': '0.1.0', 'node': {'mode': NODE_MODE, 'path': NODE_PATH, 'version': command_version([NODE_PATH, '--version']) if NODE_PATH else ''}, 'ytdlp': command_version(['yt-dlp', '--version']), 'ffmpeg': command_version(['ffmpeg', '-version']).splitlines()[0] if command_version(['ffmpeg', '-version']) else ''})
+            return response(self, 200, {'ok': True, 'version': APP_VERSION, 'node': {'mode': NODE_MODE, 'path': NODE_PATH, 'version': command_version([NODE_PATH, '--version']) if NODE_PATH else ''}, 'ytdlp': command_version(['yt-dlp', '--version']), 'ffmpeg': command_version(['ffmpeg', '-version']).splitlines()[0] if command_version(['ffmpeg', '-version']) else ''})
         if path == '/api/jobs':
             with LOCK: return response(self, 200, {'jobs': list(jobs.values()), 'config': config})
         if path == '/api/config': return response(self, 200, config)
         if path == '/api/updates':
             try:
-                code, data = update_agent('status')
+                code, data = update_status()
                 return response(self, code, data)
             except ValueError as exc: return response(self, 503, {'error': str(exc)})
         if path == '/api/logs': return response(self, 200, LOGS)
-        if path == '/api/updates/start':
-            try:
-                code, data = update_agent('update')
-                return response(self, code, data)
-            except ValueError as exc: return response(self, 503, {'error': str(exc)})
-        if path == '/api/updates/ytdlp':
-            try:
-                code, data = update_agent('ytdlp')
-                return response(self, code, data)
-            except ValueError as exc: return response(self, 503, {'error': str(exc)})
-        if path == '/api/bilibili/refresh':
-            try: return response(self, 200, bilibili_refresh_login())
-            except ValueError as exc: return response(self, 422, {'error': str(exc)})
-            except Exception: return response(self, 502, {'error': 'B站刷新请求失败，请稍后重试或重新扫码'})
         if path == '/api/auth': return response(self, 200, {**bilibili_auth(), 'youtube': bool(config.get('cookies', {}).get('youtube')), 'proxies': {k: bool(v) for k, v in config.get('proxies', {}).items()}})
         if path.startswith('/api/bilibili/qr/status/'):
             return response(self, 200, qr_poll(path.rsplit('/', 1)[-1]))
@@ -567,20 +566,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc: return response(self, 502, {'error': str(exc)})
         if path == '/api/updates/start':
             try:
-                code, data = update_agent('update')
-                return response(self, code, data)
-            except ValueError as exc: return response(self, 503, {'error': str(exc)})
-        if path == '/api/updates/ytdlp':
-            try:
-                code, data = update_agent('ytdlp')
-                return response(self, code, data)
-            except ValueError as exc: return response(self, 503, {'error': str(exc)})
-        if path == '/api/bilibili/refresh':
-            try: return response(self, 200, refresh_bilibili_login())
-            except ValueError as exc: return response(self, 422, {'error': str(exc)})
-            except Exception: return response(self, 502, {'error': 'B站登录状态刷新失败，请稍后重试'})
-        if path == '/api/updates/start':
-            try:
+                _, status = update_status()
+                if status.get('up_to_date'):
+                    return response(self, 409, {'error': f'当前已是最新版本 v{APP_VERSION}'})
+                release = status.get('release') or {}
+                if not release.get('available'):
+                    return response(self, 409, {'error': '最新 Release 缺少可校验的 ARM64 镜像资产'})
                 code, data = update_agent('update')
                 return response(self, code, data)
             except ValueError as exc: return response(self, 503, {'error': str(exc)})

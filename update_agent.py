@@ -17,7 +17,8 @@ def release_status():
 def ytdlp_status():
  try:
   r=latest(YT_REPO); a={x['name']:x['browser_download_url'] for x in r.get('assets',[])}; b=YT_DIR/'yt-dlp'; current=subprocess.run([str(b),'--version'],capture_output=True,text=True).stdout.strip() if b.is_file() else ''
-  return {'ok':True,'tag':r.get('tag_name'),'available':YT_BINARY in a and 'SHA2-256SUMS' in a,'current':current,'url':a.get(YT_BINARY),'sums':a.get('SHA2-256SUMS')}
+  tag=r.get('tag_name'); normalized=str(tag or '').lstrip('v')
+  return {'ok':True,'tag':tag,'available':YT_BINARY in a and 'SHA2-256SUMS' in a,'current':current,'up_to_date':bool(current and current==normalized),'url':a.get(YT_BINARY),'sums':a.get('SHA2-256SUMS')}
  except Exception as e:return {'ok':False,'error':str(e)}
 def download(url,path):
  with urlopen(url,timeout=120) as r,open(path,'wb') as f:shutil.copyfileobj(r,f)
