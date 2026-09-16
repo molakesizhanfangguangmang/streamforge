@@ -345,6 +345,17 @@ def warn_missing_cookie(platform, path):
     _COOKIE_WARNED.add(key)
     log_event('error', f'{platform} 已配置 Cookie 但文件不存在，本次调用不带 --cookies：{path}', 'error')
 
+def normalize_proxies(value):
+    if not isinstance(value, dict): raise ValueError('代理设置格式不正确')
+    result = {}
+    for key, raw in value.items():
+        if key not in ('bilibili', 'youtube'): continue
+        text = str(raw or '').strip()
+        if text and not re.match(r'^(https?|socks5h?|socks4a?)://[^\s/]+$', text):
+            raise ValueError(f'{"YouTube" if key == "youtube" else "B站"}代理地址需要形如 http://127.0.0.1:7890，支持 HTTP、HTTPS、SOCKS5')
+        result[key] = text
+    return result
+
 def bilibili_auth():
     path = Path(config.get('cookies', {}).get('bilibili', ''))
     result = {'bilibili': False, 'bilibili_configured': path.is_file(), 'bilibili_account': None, 'bilibili_refresh_capable': bilibili_refresh_capable()}
@@ -739,7 +750,10 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(days, bool) or not isinstance(days, int) or days not in UPDATE_CHECK_CHOICES:
                         return response(self, 422, {'error': '自动检查更新只能是每天、每 7 天、每 14 天或不自动检测'})
                     config['update_check_days'] = days
-                config.update({k: v for k, v in body.items() if k in ('concurrency', 'metadata', 'queue_mode', 'download_path', 'cookies', 'proxies')}); save_config()
+                if 'proxies' in body:
+                    try: config.setdefault('proxies', {}).update(normalize_proxies(body['proxies']))
+                    except ValueError as exc: return response(self, 422, {'error': str(exc)})
+                config.update({k: v for k, v in body.items() if k in ('concurrency', 'metadata', 'queue_mode', 'download_path', 'cookies')}); save_config()
             return response(self, 200, config)
         if path == '/api/bilibili/qr/start':
             try: return response(self, 200, qr_start())
@@ -776,7 +790,7 @@ class Handler(BaseHTTPRequestHandler):
                     return response(self, 200, {'ok': True, **auth})
                 with LOCK:
                     if isinstance(body.get('cookies'), dict): config.setdefault('cookies', {}).update(body['cookies'])
-                    if isinstance(body.get('proxies'), dict): config.setdefault('proxies', {}).update(body['proxies'])
+                    if isinstance(body.get('proxies'), dict): config.setdefault('proxies', {}).update(normalize_proxies(body['proxies']))
                     save_config()
                 log_event('auth', '认证配置已保存')
                 return response(self, 200, {'ok': True, 'restart_required': False})

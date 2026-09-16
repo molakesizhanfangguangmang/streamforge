@@ -82,6 +82,13 @@ with tempfile.TemporaryDirectory() as tmp:
     assert due(now=now + 365 * 86400) is False
     proxies = ns['config']['proxies']
     proxies['bilibili'] = proxies['youtube'] = ''
+    norm = ns['normalize_proxies']
+    assert norm({'youtube': ' http://127.0.0.1:7890 ', 'bilibili': '', 'junk': 'x'}) == {'youtube': 'http://127.0.0.1:7890', 'bilibili': ''}
+    assert norm({'bilibili': 'socks5h://10.0.0.1:1080'}) == {'bilibili': 'socks5h://10.0.0.1:1080'}
+    for bad in ({'youtube': '127.0.0.1:7890'}, {'youtube': 'ftp://127.0.0.1'}, {'bilibili': 'http://a b'}, ['x']):
+        try:
+            norm(bad); raise AssertionError(f'未拦截：{bad}')
+        except ValueError: pass
     args = ns['ytdlp_args'](['--url'], 'bilibili')
     assert '--proxy' not in args
     proxies['youtube'] = 'http://127.0.0.1:7890'
@@ -105,6 +112,13 @@ with tempfile.TemporaryDirectory() as tmp:
     handlers = [h for h in captured if isinstance(h, ns['ProxyHandler'])]
     assert len(handlers) == 1 and handlers[0].proxies == {'http': 'socks5://127.0.0.1:1080', 'https': 'socks5://127.0.0.1:1080'}
     proxies['bilibili'] = proxies['youtube'] = ''
+    norm = ns['normalize_proxies']
+    assert norm({'youtube': ' http://127.0.0.1:7890 ', 'bilibili': '', 'junk': 'x'}) == {'youtube': 'http://127.0.0.1:7890', 'bilibili': ''}
+    assert norm({'bilibili': 'socks5h://10.0.0.1:1080'}) == {'bilibili': 'socks5h://10.0.0.1:1080'}
+    for bad in ({'youtube': '127.0.0.1:7890'}, {'youtube': 'ftp://127.0.0.1'}, {'bilibili': 'http://a b'}, ['x']):
+        try:
+            norm(bad); raise AssertionError(f'未拦截：{bad}')
+        except ValueError: pass
     for code, state in [(86090, 'scanned'), (86038, 'expired'), (86101, 'waiting')]:
         ns['QR_SESSIONS']['test'] = {'created': ns['time'].time(), 'key': 'test', 'jar': jar}
         with patch.dict(ns, bilibili_request=lambda *a, code=code: io.BytesIO(json.dumps({'data': {'code': code}}).encode())):
