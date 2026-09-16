@@ -19,3 +19,7 @@ jobs:
             echo "=== $file"
             python3 "$file"
           done
+          for file in test_*.sh; do
+            echo "=== $file"
+            sh "$file"
+          done

@@ -32,7 +32,7 @@ chmod +x install.sh
 
 安装选择会写入生成的 `compose.generated.yaml`。Node.js 来源和版本可通过 `/api/health` 查看。
 
-安装和更新容器可能中断正在进行的任务；被中断的任务在服务重启后会重新排队。配置、下载目录和插件目录使用独立挂载保存。
+安装和更新容器可能中断正在进行的任务；被中断的任务在服务重启后会重新排队。更新完成后会做健康检查，新版起不来会自动回退到更新前的镜像，并留下失败容器的日志。配置、下载目录和插件目录使用独立挂载保存。
 
 ## 本地自测
 
@@ -40,7 +40,8 @@ chmod +x install.sh
 python3 test_media_files.py   # 元数据、NFO、封面命名
 python3 test_media_auth.py    # Cookie 往返、账号状态、扫码状态映射
 python3 test_plugin_zip.py    # 插件 ZIP 的安全边界与安装回退
-python3 test_jobs.py          # 任务状态与 jobs.json 的容错
+python3 test_jobs.py          # 任务状态、构建戳与 jobs.json 的容错
+sh test_update_rollback.sh    # 更新链的回退行为（桩 docker，不连网）
 ```
 
 四个脚本都不联网：把数据目录指到临时目录，只执行 `server.py` 的函数体（截到起线程之前），不起 HTTP 服务、不下载。失败时退出码非零。

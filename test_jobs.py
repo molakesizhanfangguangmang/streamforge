@@ -5,7 +5,7 @@
      否则 scheduler 只挑 queued、并发额度又被它们占着，僵尸任务会让下载停摆；
   2. jobs.json / state.json 损坏不能让服务起不来。
 """
-import json, tempfile
+import json, os, tempfile
 from pathlib import Path
 from testkit import Checks, load_server
 
@@ -83,5 +83,21 @@ with tempfile.TemporaryDirectory() as tmp:
     checks.check('进度仍记到最后一行', job['percent'] == 99.5, job['percent'])
     checks.check('跑完状态为 done', job['status'] == 'done', job['status'])
     checks.check('进程句柄已释放', ns4['processes'] == {}, ns4['processes'])
+
+    # --- 构建戳：只有镜像里带的（CI --build-arg）才算可查，本地构建与热部署一律「未知」 ---
+    os.environ['STREAMFORGE_BUILD_SHA'] = 'abcdef1234567890abcdef1234567890abcdef12'
+    os.environ['STREAMFORGE_BUILD_TIME'] = '2026-09-16 15:27:00Z'
+    os.environ['STREAMFORGE_VERSION'] = '1.0.7'
+    ns5 = load_server(Path(tmp) / 'stamp' / 'data', Path(tmp) / 'stamp' / 'downloads')
+    checks.check('CI 构建戳可查（取前 12 位）', ns5['build_stamp']() == {'sha': 'abcdef123456', 'time': '2026-09-16 15:27:00Z', 'tracked': True}, ns5['build_stamp']())
+    checks.check('版本号读环境变量', ns5['APP_VERSION'] == '1.0.7', ns5['APP_VERSION'])
+    for name in ('STREAMFORGE_BUILD_SHA', 'STREAMFORGE_BUILD_TIME', 'STREAMFORGE_VERSION'):
+        os.environ.pop(name, None)
+    ns6 = load_server(Path(tmp) / 'local' / 'data', Path(tmp) / 'local' / 'downloads')
+    checks.check('没带构建戳时如实报未知', ns6['build_stamp']() == {'sha': '', 'time': '', 'tracked': False}, ns6['build_stamp']())
+    os.environ['STREAMFORGE_BUILD_SHA'] = 'unknown'
+    ns7 = load_server(Path(tmp) / 'unknown' / 'data', Path(tmp) / 'unknown' / 'downloads')
+    checks.check('Dockerfile 默认的 unknown 不算构建戳', ns7['build_stamp']()['tracked'] is False, ns7['build_stamp']())
+    os.environ.pop('STREAMFORGE_BUILD_SHA', None)
 
 checks.done()

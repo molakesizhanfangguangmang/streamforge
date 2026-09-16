@@ -46,6 +46,20 @@ def log_event(kind, message, level='info'):
     del LOGS[:-300]
 log_event('system', 'Streamforge 服务已启动')
 APP_VERSION = os.environ.get('STREAMFORGE_VERSION', '1.0.0')
+APP_BUILD_SHA = os.environ.get('STREAMFORGE_BUILD_SHA', '').strip()
+APP_BUILD_TIME = os.environ.get('STREAMFORGE_BUILD_TIME', '').strip()
+
+def build_stamp():
+    """报出跑着的这份代码是哪个构建。
+
+    镜像由 CI 构建时带 --build-arg，本地 docker build 与 docker cp 热部署都不带；
+    所以 tracked 为假就说明这份代码来路不可查，界面照实说，不假装是某个版本。
+    """
+    sha = APP_BUILD_SHA[:12]
+    tracked = bool(sha) and sha.lower() != 'unknown'
+    return {'sha': sha if tracked else '', 'time': APP_BUILD_TIME if tracked else '', 'tracked': tracked}
+
+
 NODE_MODE = os.environ.get('STREAMFORGE_NODE', 'none')
 UPDATE_AGENT_URL = os.environ.get('STREAMFORGE_UPDATE_AGENT_URL', '')
 UPDATE_AGENT_TOKEN_FILE = os.environ.get('STREAMFORGE_UPDATE_AGENT_TOKEN_FILE', '')
@@ -835,7 +849,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == '/api/health':
-            return response(self, 200, {'ok': True, 'version': APP_VERSION, 'node': {'mode': NODE_MODE, 'path': NODE_PATH, 'version': command_version([NODE_PATH, '--version']) if NODE_PATH else ''}, 'ytdlp': command_version(['yt-dlp', '--version']), 'ffmpeg': command_version(['ffmpeg', '-version']).splitlines()[0] if command_version(['ffmpeg', '-version']) else ''})
+            return response(self, 200, {'ok': True, 'version': APP_VERSION, 'build': build_stamp(), 'node': {'mode': NODE_MODE, 'path': NODE_PATH, 'version': command_version([NODE_PATH, '--version']) if NODE_PATH else ''}, 'ytdlp': command_version(['yt-dlp', '--version']), 'ffmpeg': command_version(['ffmpeg', '-version']).splitlines()[0] if command_version(['ffmpeg', '-version']) else ''})
         if path == '/api/jobs':
             with LOCK: return response(self, 200, {'jobs': list(jobs.values()), 'config': config})
         if path == '/api/config': return response(self, 200, config)
