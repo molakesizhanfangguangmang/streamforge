@@ -345,15 +345,27 @@ def warn_missing_cookie(platform, path):
     _COOKIE_WARNED.add(key)
     log_event('error', f'{platform} 已配置 Cookie 但文件不存在，本次调用不带 --cookies：{path}', 'error')
 
+PROXY_PATTERN = re.compile(r'^(https?|socks5h?|socks4a?)://[^\s/]+$', re.I)
+
+def normalize_proxy(raw, label):
+    if raw is None: return ''
+    if not isinstance(raw, str):
+        raise ValueError(f'{label}代理地址需要形如 127.0.0.1:7890 或 http://127.0.0.1:7890，支持 HTTP、HTTPS、SOCKS5')
+    text = raw.strip().strip('"\'').strip()
+    if not text: return ''
+    if '://' not in text: text = 'http://' + text
+    text = text.rstrip('/')
+    match = PROXY_PATTERN.match(text)
+    if not match:
+        raise ValueError(f'{label}代理地址需要形如 127.0.0.1:7890 或 http://127.0.0.1:7890，支持 HTTP、HTTPS、SOCKS5')
+    return match.group(1).lower() + text[len(match.group(1)):]
+
 def normalize_proxies(value):
     if not isinstance(value, dict): raise ValueError('代理设置格式不正确')
     result = {}
     for key, raw in value.items():
         if key not in ('bilibili', 'youtube'): continue
-        text = str(raw or '').strip()
-        if text and not re.match(r'^(https?|socks5h?|socks4a?)://[^\s/]+$', text):
-            raise ValueError(f'{"YouTube" if key == "youtube" else "B站"}代理地址需要形如 http://127.0.0.1:7890，支持 HTTP、HTTPS、SOCKS5')
-        result[key] = text
+        result[key] = normalize_proxy(raw, 'YouTube' if key == 'youtube' else 'B站')
     return result
 
 def bilibili_auth():
@@ -751,8 +763,12 @@ class Handler(BaseHTTPRequestHandler):
                         return response(self, 422, {'error': '自动检查更新只能是每天、每 7 天、每 14 天或不自动检测'})
                     config['update_check_days'] = days
                 if 'proxies' in body:
-                    try: config.setdefault('proxies', {}).update(normalize_proxies(body['proxies']))
+                    try: normalized = normalize_proxies(body['proxies'])
                     except ValueError as exc: return response(self, 422, {'error': str(exc)})
+                    config.setdefault('proxies', {}).update(normalized)
+                    for key, value in normalized.items():
+                        label = 'YouTube' if key == 'youtube' else 'B站'
+                        log_event('config', f'{label}代理已{"设为 " + value if value else "清除"}，之后的解析与下载立即生效')
                 config.update({k: v for k, v in body.items() if k in ('concurrency', 'metadata', 'queue_mode', 'download_path', 'cookies')}); save_config()
             return response(self, 200, config)
         if path == '/api/bilibili/qr/start':
