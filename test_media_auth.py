@@ -20,13 +20,31 @@ with tempfile.TemporaryDirectory() as tmp:
     jar.set_cookie(Cookie(0, 'SESSDATA', 'offline-test', None, False, '.bilibili.com', True, True, '/', True, True, None, True, None, None, {'HttpOnly': None}, False))
     assert ns['save_bilibili_jar'](jar) == 1
     assert ns['save_bilibili_text']('# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t1900000000\tSESSDATA\tmanual-last\n')['bilibili_configured']
-    saved = MozillaCookieJar(str(ns['ROOT'] / 'cookies/bilibili.txt')); saved.load(ignore_discard=True)
+    saved = MozillaCookieJar(str(ns['ROOT'] / 'cookies/bilibili.txt')); saved.load(ignore_discard=True, ignore_expires=True)
     assert list(saved)[0].value == 'manual-last'
     try: ns['save_bilibili_text']('# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t1900000000\tb_nut\tno-session\n')
     except ValueError: pass
     else: raise AssertionError('missing SESSDATA accepted')
     with patch.dict(ns, bilibili_request=lambda *a: io.BytesIO(json.dumps({'data': {'isLogin': True, 'mid': 123, 'uname': 'offline'}}).encode())):
         assert ns['bilibili_auth']()['bilibili_account']['name'] == 'offline'
+    youtube_file = ns['ROOT'] / 'cookies/youtube.txt'
+    assert ns['save_youtube_text']('# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\tmanual\n.youtube.com\tTRUE\t/\tTRUE\t1900000000\tLOGIN_INFO\tx\n')['youtube_configured']
+    saved_youtube = MozillaCookieJar(str(youtube_file)); saved_youtube.load(ignore_discard=True, ignore_expires=True)
+    assert {c.name for c in saved_youtube} == {'SID', 'LOGIN_INFO'}
+    assert '--cookies' in ns['ytdlp_args'](['--version'], 'youtube')
+    auth_youtube = ns['youtube_auth']()
+    assert auth_youtube['youtube'] is True and auth_youtube['youtube_cookies'] == 2
+    header_form = ns['save_youtube_text']('SID=raw-value; SAPISID=raw-sapisid; PREF=tz=UTC')
+    assert header_form['youtube'] is True
+    converted = MozillaCookieJar(str(youtube_file)); converted.load(ignore_discard=True, ignore_expires=True)
+    assert ('PREF' in {c.name for c in converted}) and all(c.domain == '.youtube.com' for c in converted) and len(converted) == 3
+    for bad in ['', 'no tab and no equals', '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1900000000\tPREF\tno-login\n']:
+        try: ns['save_youtube_text'](bad)
+        except ValueError: pass
+        else: raise AssertionError('invalid YouTube cookie accepted: %r' % bad)
+    youtube_file.unlink()
+    assert '--cookies' not in ns['ytdlp_args'](['--version'], 'youtube')
+    assert ns['youtube_auth']()['youtube_error'] == 'Cookie 文件已丢失，请重新粘贴'
     for code, state in [(86090, 'scanned'), (86038, 'expired'), (86101, 'waiting')]:
         ns['QR_SESSIONS']['test'] = {'created': ns['time'].time(), 'key': 'test', 'jar': jar}
         with patch.dict(ns, bilibili_request=lambda *a, code=code: io.BytesIO(json.dumps({'data': {'code': code}}).encode())):
@@ -73,4 +91,4 @@ with tempfile.TemporaryDirectory() as tmp:
     try: ns['validate_plugin_zip'](plugin_zip([(link, 'target')]))
     except ValueError: pass
     else: raise AssertionError('symbolic link ZIP member accepted')
-print('PASS: cookie roundtrip/account, QR status mapping, media metadata, plugin ZIP validation/install')
+print('PASS: cookie roundtrip/account, YouTube cookie save, QR status mapping, media metadata, plugin ZIP validation/install')

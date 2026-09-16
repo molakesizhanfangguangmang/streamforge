@@ -238,6 +238,67 @@ def save_bilibili_text(cookie_text):
         candidate.unlink(missing_ok=True)
     return bilibili_auth()
 
+YOUTUBE_AUTH_COOKIE_NAMES = {'SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LOGIN_INFO',
+                             '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID'}
+
+def youtube_cookie_path(): return ROOT / 'cookies' / 'youtube.txt'
+
+def normalize_cookie_text(cookie_text):
+    """Accept a Netscape cookie file or a raw `name=value; name2=value2` header string."""
+    if not isinstance(cookie_text, str) or not cookie_text.strip():
+        raise ValueError('Cookie 内容不能为空')
+    header = '# Netscape HTTP Cookie File'
+    lines = [line.rstrip('\r') for line in cookie_text.splitlines()]
+    # `#HttpOnly_` is part of the domain field, not a comment: keep those rows.
+    rows = [line for line in lines if line.strip() and (line.startswith('#HttpOnly_') or not line.lstrip().startswith('#'))]
+    names = [line.split('\t')[5].strip() for line in rows if len(line.split('\t')) >= 7 and line.split('\t')[5].strip()]
+    if names:
+        return '\n'.join([header] + rows) + '\n', names
+    pairs = []
+    for part in cookie_text.replace('\n', ';').split(';'):
+        name, sep, value = part.partition('=')
+        if sep and name.strip(): pairs.append((name.strip(), value.strip()))
+    if not pairs:
+        raise ValueError('无法识别 Cookie 内容，请粘贴 Netscape 格式文件或 name=value; name2=value2 形式的字符串')
+    lines = [header] + ['\t'.join(['.youtube.com', 'TRUE', '/', 'TRUE', '1900000000', name, value]) for name, value in pairs]
+    return '\n'.join(lines) + '\n', [name for name, _ in pairs]
+
+def youtube_auth(count=None):
+    path = Path(config.get('cookies', {}).get('youtube', ''))
+    result = {'youtube': False, 'youtube_configured': path.is_file(), 'youtube_cookies': 0, 'youtube_error': None}
+    if not path.is_file():
+        if config.get('cookies', {}).get('youtube'): result['youtube_error'] = 'Cookie 文件已丢失，请重新粘贴'
+        return result
+    try:
+        jar = MozillaCookieJar(str(path))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        result['youtube_cookies'] = len(jar) if count is None else count
+        result['youtube'] = bool(result['youtube_cookies'])
+    except Exception:
+        result['youtube_error'] = 'Cookie 文件无法解析，请重新粘贴'
+    return result
+
+def save_youtube_text(cookie_text):
+    content, names = normalize_cookie_text(cookie_text)
+    if not set(names) & YOUTUBE_AUTH_COOKIE_NAMES:
+        raise ValueError('Cookie 中没有 YouTube 登录凭据（缺少 SID、SAPISID 或 LOGIN_INFO 等字段）')
+    target = youtube_cookie_path()
+    candidate = target.with_suffix('.candidate')
+    candidate.write_text(content, encoding='utf-8')
+    try:
+        jar = MozillaCookieJar(str(candidate))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        count = len(jar)
+        if not count: raise ValueError('Cookie 文件没有可用条目')
+        if target.is_file():
+            shutil.copy2(target, BACKUPS / ('youtube-cookie-' + uuid.uuid4().hex + '.txt'))
+        os.replace(candidate, target)
+        config.setdefault('cookies', {})['youtube'] = str(target)
+        save_config()
+    finally:
+        candidate.unlink(missing_ok=True)
+    return youtube_auth(count)
+
 def bilibili_auth():
     path = Path(config.get('cookies', {}).get('bilibili', ''))
     result = {'bilibili': False, 'bilibili_configured': path.is_file(), 'bilibili_account': None, 'bilibili_refresh_capable': bilibili_refresh_capable()}
@@ -396,7 +457,7 @@ def ytdlp_args(args, platform='bilibili'):
         if plugin_dir.is_dir(): cmd += ['--plugin-dirs', str(plugin_dir)]
     cookie = config.get('cookies', {}).get(platform, '')
     proxy = config.get('proxies', {}).get(platform, '')
-    if cookie: cmd += ['--cookies', cookie]
+    if cookie and Path(cookie).is_file(): cmd += ['--cookies', cookie]
     if proxy: cmd += ['--proxy', proxy]
     return cmd + args
 
@@ -518,7 +579,7 @@ class Handler(BaseHTTPRequestHandler):
                 return response(self, code, data)
             except ValueError as exc: return response(self, 503, {'error': str(exc)})
         if path == '/api/logs': return response(self, 200, LOGS)
-        if path == '/api/auth': return response(self, 200, {**bilibili_auth(), 'youtube': bool(config.get('cookies', {}).get('youtube')), 'proxies': {k: bool(v) for k, v in config.get('proxies', {}).items()}})
+        if path == '/api/auth': return response(self, 200, {**bilibili_auth(), **youtube_auth(), 'proxies': {k: bool(v) for k, v in config.get('proxies', {}).items()}})
         if path.startswith('/api/bilibili/qr/status/'):
             return response(self, 200, qr_poll(path.rsplit('/', 1)[-1]))
         if path.startswith('/api/bilibili/qr/image/'):
@@ -602,6 +663,10 @@ class Handler(BaseHTTPRequestHandler):
                     auth = save_bilibili_text(body['bilibili_cookie_text'])
                     log_event('auth', 'B站 Cookie 已由手动输入覆盖')
                     return response(self, 200, {'ok': True, **auth})
+                if 'youtube_cookie_text' in body:
+                    auth = save_youtube_text(body['youtube_cookie_text'])
+                    log_event('auth', f'YouTube Cookie 已保存（{auth["youtube_cookies"]} 条）')
+                    return response(self, 200, {'ok': True, **auth})
                 with LOCK:
                     if isinstance(body.get('cookies'), dict): config.setdefault('cookies', {}).update(body['cookies'])
                     if isinstance(body.get('proxies'), dict): config.setdefault('proxies', {}).update(body['proxies'])
@@ -645,7 +710,9 @@ class Handler(BaseHTTPRequestHandler):
             with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
                 if 'config' in selected: z.writestr('config.json', json.dumps(config, ensure_ascii=False, indent=2))
                 if 'cookies' in selected:
-                    for key, value in config.get('cookies', {}).items(): z.writestr(f'cookies/{key}.txt', value)
+                    for key, value in config.get('cookies', {}).items():
+                        source = Path(value) if isinstance(value, str) and value else None
+                        if source and source.is_file(): z.write(source, f'cookies/{key}.txt')
                 if 'proxies' in selected: z.writestr('proxies.json', json.dumps(config.get('proxies', {}), ensure_ascii=False, indent=2))
                 if 'queue' in selected: z.writestr('jobs.json', json.dumps(list(jobs.values()), ensure_ascii=False, indent=2))
                 if 'plugins' in selected:
@@ -655,12 +722,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/restore':
             name = body.get('name', ''); selected = set(body.get('include', [])); source = BACKUPS / Path(name).name
             if not source.is_file(): return response(self, 404, {'error': 'backup not found'})
-            with zipfile.ZipFile(source) as z:
-                if 'config' in selected and 'config.json' in z.namelist(): config.update(json.loads(z.read('config.json'))); save_config()
-                if 'queue' in selected and 'jobs.json' in z.namelist(): jobs.clear(); jobs.update({j['id']: j for j in json.loads(z.read('jobs.json'))}); save_jobs()
-                if 'plugins' in selected:
-                    for item in z.namelist():
-                        if item.startswith('plugins/') and not item.endswith('/'): z.extract(item, ROOT)
+            try:
+                with zipfile.ZipFile(source) as z:
+                    if 'config' in selected and 'config.json' in z.namelist(): config.update(json.loads(z.read('config.json'))); save_config()
+                    if 'cookies' in selected:
+                        restored = []
+                        for item in z.namelist():
+                            if item.startswith('cookies/') and item.endswith('.txt') and not item.endswith('/'):
+                                key = Path(item).stem
+                                current = Path(config.get('cookies', {}).get(key, '') or '')
+                                if current.is_file(): shutil.copy2(current, BACKUPS / (f'{key}-cookie-' + uuid.uuid4().hex + '.txt'))
+                                target = current if current.name and current.suffix == '.txt' else ROOT / 'cookies' / f'{key}.txt'
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                target.write_bytes(z.read(item))
+                                config.setdefault('cookies', {})[key] = str(target)
+                                restored.append(key)
+                        save_config()
+                        log_event('auth', 'Cookie 已从备份恢复：' + (', '.join(sorted(restored)) or '无'))
+                    if 'queue' in selected and 'jobs.json' in z.namelist(): jobs.clear(); jobs.update({j['id']: j for j in json.loads(z.read('jobs.json'))}); save_jobs()
+                    if 'plugins' in selected:
+                        for item in z.namelist():
+                            if item.startswith('plugins/') and not item.endswith('/'): z.extract(item, ROOT)
+            except Exception as exc:
+                log_event('error', f'从备份恢复失败：{exc}', 'error')
+                return response(self, 500, {'error': f'恢复失败：{exc}'})
             return response(self, 200, {'ok': True, 'restart_required': bool({'config', 'plugins'} & selected)})
         response(self, 404, {'error': 'not found'})
     def do_PATCH(self):

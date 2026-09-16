@@ -42,7 +42,7 @@ $('#backup-now').addEventListener('click',async()=>{const include=['config','coo
 async function startHostUpdate(){if(!confirm('更新会备份 Compose、下载并校验官方 ARM64 镜像、重建流铸容器，并会中断当前任务。确定继续吗？'))return;const r=await fetch('/api/updates/start',{method:'POST'}),d=await r.json();if(!r.ok){showToast(d.error||'无法开始更新');return}showToast('更新已开始，服务重建期间页面会短暂断开');setTimeout(refreshUpdateStatus,3000)}
 async function startYtdlpUpdate(){if(!confirm('只更新 yt-dlp：下载官方 ARM64 文件并校验 SHA256，不重建流铸容器。确定继续吗？'))return;const r=await fetch('/api/updates/ytdlp',{method:'POST'}),d=await r.json();if(!r.ok){showToast(d.error||'无法开始 yt-dlp 更新');return}showToast('yt-dlp 更新已开始；新任务完成后使用新版');setTimeout(refreshUpdateStatus,3000)}
 $('#update-project').onclick=startHostUpdate;$('#update-ytdlp').onclick=startYtdlpUpdate;refreshUpdateStatus();setInterval(refreshUpdateStatus,60000);$('#clear-logs').addEventListener('click',()=>showToast('日志已清空'));
-$$('.settings-tab').forEach(b=>b.addEventListener('click',()=>{$$('.settings-tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$$('.settings-section').forEach(x=>x.classList.remove('active'));$(`#${b.dataset.settings}-settings`).classList.add('active')}));$$('.save-btn:not(#save-download-path):not(#save-bilibili-cookie)').forEach(b=>b.addEventListener('click',()=>showToast('设置已保存到本地')));$$('.outline-btn').forEach(b=>b.addEventListener('click',()=>{if(b.textContent.includes('Cookie'))showToast(`${b.textContent.trim()}功能将在后端接入`)}));
+$$('.settings-tab').forEach(b=>b.addEventListener('click',()=>{$$('.settings-tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$$('.settings-section').forEach(x=>x.classList.remove('active'));$(`#${b.dataset.settings}-settings`).classList.add('active')}));$$('.save-btn:not(#save-download-path):not(#save-bilibili-cookie):not(#save-youtube-cookie)').forEach(b=>b.addEventListener('click',()=>showToast('设置已保存到本地')));$$('.outline-btn').forEach(b=>b.addEventListener('click',()=>{if(b.id==='youtube-upload')return;if(b.textContent.includes('Cookie'))showToast(`${b.textContent.trim()}功能将在后端接入`)}));
 async function refreshDownloadPath(){try{const r=await fetch('/api/config'),c=await r.json();if(c.download_path)$('#download-path').value=c.download_path}catch(e){}}
 $('#save-download-path').addEventListener('click',async()=>{const button=$('#save-download-path'),status=$('#download-path-status'),path=$('#download-path').value.trim();button.disabled=true;status.textContent='正在验证目录…';try{const r=await fetch('/api/download-path',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})}),d=await r.json();if(!r.ok)throw Error(d.error||'目录验证失败');$('#download-path').value=d.path;status.textContent=`已确认：${d.path} 可写`;showToast('下载目录已确认')}catch(e){status.textContent=`错误：${e.message}`;showToast(e.message)}finally{button.disabled=false}});
 refreshDownloadPath();
@@ -114,6 +114,22 @@ $('#save-bilibili-cookie').addEventListener('click',async()=>{
     $('#bilibili-cookie').value='';await refreshAuth();showToast(data.bilibili?'Cookie 已保存并通过账号验证':'Cookie 已保存，但账号验证未通过');
   }catch(error){showToast(error.message)}finally{button.disabled=false;button.textContent='保存粘贴的 Cookie'}
 });
+$('#youtube-upload').addEventListener('click',()=>$('#youtube-file').click());
+$('#youtube-file').addEventListener('change',async()=>{
+  const file=$('#youtube-file').files[0];if(!file)return;
+  if(file.size>2*1024*1024){showToast('Cookie 文件过大，请确认选择的是 cookies.txt');$('#youtube-file').value='';return}
+  $('#youtube-cookie').value=await file.text();$('#youtube-file').value='';showToast('已读取文件，点击“保存粘贴的 Cookie”写入');
+});
+$('#save-youtube-cookie').addEventListener('click',async()=>{
+  const button=$('#save-youtube-cookie'),text=$('#youtube-cookie').value;
+  if(!text.trim()){showToast('请先粘贴 Cookie 内容');return}
+  button.disabled=true;button.textContent='正在保存…';
+  try{
+    const response=await fetch('/api/auth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({youtube_cookie_text:text})});
+    const data=await response.json();if(!response.ok)throw Error(data.error||'Cookie 保存失败');
+    $('#youtube-cookie').value='';await refreshAuth();showToast(`YouTube Cookie 已保存（${data.youtube_cookies} 条）`);
+  }catch(error){showToast(error.message)}finally{button.disabled=false;button.textContent='保存粘贴的 Cookie'}
+});
 $('#qr-retry').addEventListener('click',openQrLogin);
 $('#close-qr').addEventListener('click',closeQr);
 $('#qr-modal').addEventListener('click',event=>{if(event.target===$('#qr-modal'))closeQr()});
@@ -137,7 +153,11 @@ async function refreshAuth(){
     const refresh=$('#bilibili-refresh');
     refresh.disabled=data.bilibili_refresh_capable!==true;
     refresh.title=refresh.disabled?'当前登录没有可用刷新令牌，请重新扫码登录':'';
-    const youtube=$('#youtube-status');youtube.textContent=data.youtube===true?'已配置':data.youtube===false?'未配置':'状态未知';
+    const youtube=$('#youtube-status'),note=$('#youtube-note');
+    youtube.textContent=data.youtube===true?`已配置 ${data.youtube_cookies} 条`:data.youtube_configured?'Cookie 无效':'未配置';
+    youtube.title=data.youtube_error||'';
+    if(note&&!note.dataset.base)note.dataset.base=note.textContent;
+    if(note)note.textContent=data.youtube_error?`${data.youtube_error}。（${note.dataset.base}）`:note.dataset.base;
   }catch(error){if(version!==authVersion)return;status.textContent='状态未知';status.classList.remove('verified');status.title=error.message;account.textContent='';account.classList.add('hidden');$('#youtube-status').textContent='状态未知'}
 }
 async function refreshLogs(){try{const d=await (await fetch('/api/logs')).json();const box=$('#log-box');if(!box)return;box.innerHTML=d.length?d.map(x=>`<div data-log-kind="${escapeHtml(x.kind??'')}" data-log-level="${escapeHtml(x.level??'')}"><time>${display(x.time)}</time><span class="log-${escapeHtml(x.level??'')}">${display(x.message)}</span></div>`).join(''):'<div><span class="log-muted">暂无日志</span></div>'}catch(e){}}
